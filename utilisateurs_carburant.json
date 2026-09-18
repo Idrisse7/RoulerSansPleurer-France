@@ -18,8 +18,8 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": null,
-    "sort_mode": "distance",
+    "last_signature": "price|38170004:2.250|38700003:2.250|38360006:2.250|38800003:2.250|38240006:2.250",
+    "sort_mode": "price",
     "mode_fouine": false
   },
   "8615737858": {
