@@ -1,0 +1,83 @@
+name: Bot RoulerSansPleurer
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # filet de sécurité
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: rouler-sans-pleurer
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Récupérer le code et les données
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install "python-telegram-bot[job-queue]" aiohttp
+
+      - name: Lancer le bot (arrêt propre avant la limite GitHub)
+        env:
+          ROULER_TOKEN: ${{ secrets.ROULER_TOKEN }}
+          MAX_RUNTIME_SECONDS: 19800
+        run: |
+          python "RoulerSansPleurer_France_Fouine_modifie.py" &
+          BOT_PID=$!
+          START_TIME=$(date +%s)
+
+          while kill -0 "$BOT_PID" 2>/dev/null; do
+            sleep 300
+
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START_TIME))
+
+            if [ "$ELAPSED" -ge "$MAX_RUNTIME_SECONDS" ]; then
+              echo "⏱️ Limite interne atteinte, arrêt volontaire du bot."
+              kill "$BOT_PID" 2>/dev/null || true
+              break
+            fi
+          done
+
+          wait "$BOT_PID" 2>/dev/null || true
+
+      - name: Sauvegarder les fichiers JSON
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "*.json" || true
+
+          if git diff --cached --quiet; then
+            echo "Aucune modification JSON à sauvegarder."
+          else
+            git commit -m "Mise à jour des abonnés"
+            git push
+          fi
+
+      - name: Relancer immédiatement le même workflow
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run "Bot RoulerSansPleurer" --ref main
