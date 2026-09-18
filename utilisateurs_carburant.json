@@ -1,0 +1,25 @@
+{
+  "7919387190": {
+    "chat_id": 7919387190,
+    "username": null,
+    "first_name": "Idrisse",
+    "last_name": "Drissi",
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": null,
+    "region_code": null,
+    "department": null,
+    "department_code": null,
+    "city": null,
+    "lat": null,
+    "lon": null,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
+  }
+}
