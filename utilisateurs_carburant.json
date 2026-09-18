@@ -19,7 +19,7 @@
     "fuel": "Gazole",
     "sort_by": "price",
     "last_signature": null,
-    "sort_mode": "price",
+    "sort_mode": "distance",
     "mode_fouine": false
   },
   "8615737858": {
