@@ -67,5 +67,28 @@
     "last_signature": null,
     "sort_mode": "price",
     "mode_fouine": false
+  },
+  "945467587": {
+    "chat_id": 945467587,
+    "username": "tu_coco_pas73",
+    "first_name": "Aurelien",
+    "last_name": "Gros",
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": null,
+    "region_code": null,
+    "department": null,
+    "department_code": null,
+    "city": null,
+    "lat": null,
+    "lon": null,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
   }
 }
