@@ -15,12 +15,12 @@
     "city": "Grenoble",
     "lat": 45.198429,
     "lon": 5.71808,
-    "radius": 100,
+    "radius": 5,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38150012:2.220|1230003:2.240|73800003:2.245|38970000:2.248|73400001:2.248",
+    "last_signature": "price|38240006:2.250|38431001:2.419|38600003:2.421|38180001:2.423|38400006:2.434",
     "sort_mode": "price",
-    "mode_fouine": true
+    "mode_fouine": false
   },
   "8615737858": {
     "chat_id": 8615737858,
