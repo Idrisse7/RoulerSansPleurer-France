@@ -90,5 +90,28 @@
     "last_signature": "price|73130002:2.139|73300004:2.139|73300002:2.159|38580004:2.165|73870003:2.509",
     "sort_mode": "price",
     "mode_fouine": true
+  },
+  "6874206402": {
+    "chat_id": 6874206402,
+    "username": null,
+    "first_name": "She",
+    "last_name": null,
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": null,
+    "region_code": null,
+    "department": null,
+    "department_code": null,
+    "city": null,
+    "lat": null,
+    "lon": null,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
   }
 }
