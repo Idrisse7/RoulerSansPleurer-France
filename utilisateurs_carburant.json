@@ -15,10 +15,10 @@
     "city": "Grenoble",
     "lat": 45.1842,
     "lon": 5.7155,
-    "radius": 5,
-    "fuel": "SP95-E10",
+    "radius": 100,
+    "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": null,
+    "last_signature": "price|38150012:2.220|1230003:2.240|73800003:2.245|38970000:2.248|73400001:2.248",
     "sort_mode": "price",
     "mode_fouine": true
   },
