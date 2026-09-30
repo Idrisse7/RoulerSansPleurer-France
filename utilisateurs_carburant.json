@@ -123,18 +123,18 @@
     "latitude": null,
     "longitude": null,
     "location_updated_at": null,
-    "region": null,
-    "region_code": null,
-    "department": null,
-    "department_code": null,
-    "city": null,
-    "lat": null,
-    "lon": null,
-    "radius": 40,
-    "fuel": "Gazole",
+    "region": "Auvergne-Rhône-Alpes",
+    "region_code": "84",
+    "department": "Isère",
+    "department_code": "38",
+    "city": "Grenoble",
+    "lat": 45.1842,
+    "lon": 5.7155,
+    "radius": 10,
+    "fuel": "SP95-E10",
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": true
   }
 }
