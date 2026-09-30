@@ -113,5 +113,28 @@
     "last_signature": "price|42000014:2.250|42100018:2.250|42000015:2.250|42440009:2.250|42290002:2.250",
     "sort_mode": "price",
     "mode_fouine": false
+  },
+  "1654216330": {
+    "chat_id": 1654216330,
+    "username": "akjr98",
+    "first_name": "Ovila",
+    "last_name": "Acolatse",
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": null,
+    "region_code": null,
+    "department": null,
+    "department_code": null,
+    "city": null,
+    "lat": null,
+    "lon": null,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
   }
 }
