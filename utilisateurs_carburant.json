@@ -133,8 +133,8 @@
     "radius": 10,
     "fuel": "SP95-E10",
     "sort_by": "price",
-    "last_signature": null,
+    "last_signature": "price|38600003:2.173|38400006:2.184|38180001:2.185|38320005:2.193|38120001:2.195",
     "sort_mode": "price",
-    "mode_fouine": true
+    "mode_fouine": false
   }
 }
