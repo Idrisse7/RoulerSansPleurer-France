@@ -136,5 +136,28 @@
     "last_signature": "price|38120002:1.990|38600003:2.126|38120001:2.158|38400006:2.179|38180001:2.180",
     "sort_mode": "price",
     "mode_fouine": false
+  },
+  "329691244": {
+    "chat_id": 329691244,
+    "username": "MmFsociety",
+    "first_name": "༺𓆩 Thibault 𓆪༻",
+    "last_name": null,
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": null,
+    "region_code": null,
+    "department": null,
+    "department_code": null,
+    "city": null,
+    "lat": null,
+    "lon": null,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
   }
 }
