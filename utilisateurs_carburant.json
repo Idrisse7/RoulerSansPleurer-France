@@ -228,5 +228,28 @@
     "last_signature": null,
     "sort_mode": "price",
     "mode_fouine": false
+  },
+  "7154715857": {
+    "chat_id": 7154715857,
+    "username": "lebiggb",
+    "first_name": "Big GB",
+    "last_name": null,
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": "Île-de-France",
+    "region_code": "11",
+    "department": "Paris",
+    "department_code": "75",
+    "city": "Paris",
+    "lat": 48.8589,
+    "lon": 2.347,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
   }
 }
