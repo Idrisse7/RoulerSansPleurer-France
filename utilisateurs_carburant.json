@@ -271,8 +271,8 @@
     "radius": 40,
     "fuel": "E85",
     "sort_by": "price",
-    "last_signature": null,
+    "last_signature": "price|38180001:0.869|38400006:0.869|38430004:0.869|38380003:0.869|38470004:0.869",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": true
   }
 }
