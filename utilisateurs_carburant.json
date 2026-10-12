@@ -274,5 +274,28 @@
     "last_signature": "price|38180001:0.869|38400006:0.869|38430004:0.869|38380003:0.869|38470004:0.869",
     "sort_mode": "price",
     "mode_fouine": true
+  },
+  "8217106809": {
+    "chat_id": 8217106809,
+    "username": null,
+    "first_name": "Thomas",
+    "last_name": null,
+    "location_source": null,
+    "latitude": null,
+    "longitude": null,
+    "location_updated_at": null,
+    "region": null,
+    "region_code": null,
+    "department": null,
+    "department_code": null,
+    "city": null,
+    "lat": null,
+    "lon": null,
+    "radius": 40,
+    "fuel": "Gazole",
+    "sort_by": "price",
+    "last_signature": null,
+    "sort_mode": "price",
+    "mode_fouine": false
   }
 }
