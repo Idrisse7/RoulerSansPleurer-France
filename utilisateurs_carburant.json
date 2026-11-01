@@ -292,7 +292,7 @@
     "lat": 45.1842,
     "lon": 5.7155,
     "radius": 20,
-    "fuel": "Gazole",
+    "fuel": "SP95-E10",
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
