@@ -4,7 +4,7 @@ AUTO_CHECK_FOOTER = """🔄 <b>Vérification automatique toutes les 10 minutes.<
 
 ⚠️ Bug ou non-réponse ? Envoie <b>/start</b> pour relancer le bot."""
 
-# bot_carburant_france.py
+# RoulerSansPleurer_France_Fouine_modifie.py
 import asyncio
 import html
 import json
@@ -12,6 +12,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -1231,6 +1232,9 @@ def panel_keyboard(actor_id):
     rows = [[InlineKeyboardButton("👥 Utilisateurs", callback_data="ADM:LIST:0")]]
     if is_admin(actor_id):
         rows.append([InlineKeyboardButton("📢 Annonce à tous", callback_data="ADM:ANN")])
+    # Redémarrage accessible à toute l'équipe (admin et modérateur).
+    if is_staff(actor_id):
+        rows.append([InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="ADM:RESTART")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1302,6 +1306,35 @@ async def _show(q, text, markup):
     )
 
 
+async def unpin_update_job(context: ContextTypes.DEFAULT_TYPE):
+    """Retire une annonce épinglée après 24 h, sans toucher à une épingle plus récente."""
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id"))
+    message_id = int(data.get("message_id"))
+    profile = users.get(str(chat_id))
+    if not profile or int(profile.get("update_pin_message_id") or 0) != message_id:
+        return  # cette annonce a déjà été remplacée par une mise à jour plus récente
+    try:
+        await context.bot.unpin_chat_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        print(f"[BOT] retrait automatique de l'épingle impossible ({chat_id}): {exc}")
+        return
+    profile.pop("update_pin_message_id", None)
+    profile.pop("update_pin_expires_at", None)
+    save_users()
+
+
+def schedule_update_unpin(application, chat_id, message_id, expires_at):
+    """Programme le retrait d'une épingle, avec un nom unique par message."""
+    delay = max(1, float(expires_at) - time.time())
+    application.job_queue.run_once(
+        unpin_update_job,
+        when=delay,
+        data={"chat_id": int(chat_id), "message_id": int(message_id)},
+        name=f"update-unpin-{chat_id}-{message_id}",
+    )
+
+
 async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     actor = q.from_user.id
@@ -1326,6 +1359,38 @@ async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         text, markup = list_view(actor, int(arg or 0))
         await _show(q, text, markup)
+        return
+
+    # ── Redémarrage du bot (admin et modérateur) ──
+    if act == "RESTART":
+        await q.answer()
+        await _show(
+            q,
+            "🔄 <b>Redémarrer le bot ?</b>\n\n"
+            "Le bot va se relancer. Les utilisateurs pourront le réutiliser "
+            "après quelques secondes.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirmer le redémarrage", callback_data="ADM:RESTARTOK")],
+                [InlineKeyboardButton("❌ Annuler", callback_data="ADM:PANEL")],
+            ]),
+        )
+        return
+    if act == "RESTARTOK":
+        # Double vérification : seuls les admins/modérateurs peuvent relancer.
+        if not is_staff(actor):
+            await q.answer("⛔ Réservé à l'équipe d'administration.", show_alert=True)
+            return
+        await q.answer("🔄 Redémarrage en cours…")
+        try:
+            await q.edit_message_text(
+                "🔄 <b>Redémarrage du bot en cours…</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+        # Remplace le processus Python courant : même script, mêmes secrets et même environnement.
+        os.execv(sys.executable, [sys.executable] + sys.argv)
         return
 
     # ── Annonce (propriétaire uniquement) ──
@@ -1354,25 +1419,52 @@ async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not body:
                 await _show(q, "❌ Annonce expirée. Recommence.", panel_keyboard(actor))
                 return
-            sent = failed = 0
+            sent = failed = pinned = pin_failed = 0
             for cid, p in list(users.items()):
                 if p.get("banned"):
                     continue
                 try:
-                    await context.bot.send_message(
+                    message = await context.bot.send_message(
                         chat_id=int(cid),
                         text="📢 <b>Annonce</b>\n\n" + body,
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True,
                     )
                     sent += 1
+                    # L'annonce reste un message normal même si l'épinglage est refusé.
+                    try:
+                        await context.bot.pin_chat_message(
+                            chat_id=int(cid),
+                            message_id=message.message_id,
+                            disable_notification=True,
+                        )
+                        old_message_id = p.get("update_pin_message_id")
+                        expires_at = time.time() + 24 * 60 * 60
+                        p["update_pin_message_id"] = message.message_id
+                        p["update_pin_expires_at"] = expires_at
+                        save_users()
+                        # Remplace l'ancienne épingle uniquement après la réussite de la nouvelle.
+                        if old_message_id and int(old_message_id) != message.message_id:
+                            try:
+                                await context.bot.unpin_chat_message(
+                                    chat_id=int(cid), message_id=int(old_message_id)
+                                )
+                            except Exception as exc:
+                                print(f"[BOT] ancienne épingle impossible à retirer ({cid}): {exc}")
+                        schedule_update_unpin(context.application, int(cid), message.message_id, expires_at)
+                        pinned += 1
+                    except Exception as exc:
+                        pin_failed += 1
+                        print(f"[BOT] épinglage impossible pour {cid}: {exc}")
                 except Exception:
                     failed += 1
                 await asyncio.sleep(0.05)  # reste sous les limites d'envoi de Telegram
             await _show(
                 q,
-                f"✅ Annonce envoyée à <b>{sent}</b> utilisateur(s)."
-                + (f"\n⚠️ {failed} échec(s) (bot bloqué ou chat supprimé)." if failed else ""),
+                f"✅ Annonce envoyée à <b>{sent}</b> utilisateur(s).\n"
+                f"📌 Épingles actives : <b>{pinned}</b> (24 h)."
+                + (f"\n⚠️ {pin_failed} épinglage(s) impossible(s) (droits Telegram ou restriction du chat)." if pin_failed else "")
+                + (f"\n⚠️ {failed} envoi(s) impossible(s) (bot bloqué ou chat supprimé)." if failed else ""),
                 panel_keyboard(actor),
             )
         return
@@ -1645,6 +1737,17 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     load_users()
+    # Restaure les retraits d'épingles après un redémarrage du bot.
+    now = time.time()
+    for cid, profile in list(users.items()):
+        message_id = profile.get("update_pin_message_id")
+        expires_at = profile.get("update_pin_expires_at")
+        if not message_id or not expires_at:
+            continue
+        try:
+            schedule_update_unpin(application, int(cid), int(message_id), float(expires_at))
+        except Exception as exc:
+            print(f"[BOT] restauration de l'échéance d'épingle impossible ({cid}): {exc}")
     # Notification de démarrage envoyée au CHAT_ID (secret GitHub), si défini.
     if CHAT_ID:
         try:
