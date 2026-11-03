@@ -39,6 +39,7 @@ jobs:
       - name: Lancer le bot (arrêt propre avant la limite GitHub)
         env:
           ROULER_TOKEN: ${{ secrets.ROULER_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
           MAX_RUNTIME_SECONDS: 19800
         run: |
           python "RoulerSansPleurer_France_Fouine_modifie.py" &
