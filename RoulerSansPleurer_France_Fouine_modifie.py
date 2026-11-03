@@ -98,9 +98,10 @@ def entry_mode_keyboard():
         [
             [KeyboardButton("📍 Partager ma position (plus précis)", request_location=True)],
             [KeyboardButton("🗺️ Choisir ma ville manuellement")],
+            [KeyboardButton("🏠 Accueil")],
         ],
         resize_keyboard=True,
-        one_time_keyboard=True,
+        one_time_keyboard=False,
     )
 
 users = {}
@@ -436,6 +437,42 @@ def main_keyboard(chat_id=None):
     ] + admin_row)
 
 
+async def open_user_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Retourne au menu utilisateur sans relancer la configuration ni modifier les recherches."""
+    chat_id = update.effective_chat.id
+    p = user_profile(chat_id)
+    if not p.get("city") or p.get("lat") is None or not p.get("fuel"):
+        message = (
+            "🏠 <b>Accueil</b>\n\n"
+            "Ton espace n'est pas encore configuré. Choisis ta position pour commencer."
+        )
+        if update.callback_query:
+            q = update.callback_query
+            await q.answer()
+            await q.edit_message_text(message, parse_mode=ParseMode.HTML)
+            await q.message.reply_text("👇 Choisis une option :", reply_markup=entry_mode_keyboard())
+        else:
+            await update.message.reply_text(message, parse_mode=ParseMode.HTML,
+                                            reply_markup=entry_mode_keyboard())
+        return CHOOSE_ENTRY
+
+    if update.callback_query:
+        q = update.callback_query
+        await q.answer()
+        await q.edit_message_text(
+            profile_text(p),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(chat_id),
+        )
+    else:
+        await update.message.reply_text(
+            profile_text(p),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard(chat_id),
+        )
+    return MAIN_MENU
+
+
 async def toggle_fouine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -495,7 +532,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⛑️ Un souci ou une question ?",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⛑️ Assistance technique", url=SUPPORT_URL)]]
+            [[InlineKeyboardButton("⛽ Ouvrir le panneau carburants", callback_data="USER_HOME")]]
+            + [[InlineKeyboardButton("⛑️ Assistance technique", url=SUPPORT_URL)]]
             + ([[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
                if is_staff(chat_id) else [])
         ),
@@ -1761,6 +1799,7 @@ async def post_init(application: Application):
 
 def menu_handlers():
     return [
+        CallbackQueryHandler(open_user_home, pattern=r"^USER_HOME$"),
         CallbackQueryHandler(show_prices, pattern=r"^PRICES$"),
         CallbackQueryHandler(show_nearest, pattern=r"^NEAREST$"),
         CallbackQueryHandler(show_ruptures, pattern=r"^RUPTURES$"),
@@ -1781,7 +1820,10 @@ def build_application():
     conv = ConversationHandler(
         # Les boutons du menu sont aussi des points d'entrée : ils marchent
         # même après un redémarrage du bot, sans refaire /start.
-        entry_points=[CommandHandler("start", start)] + menu_handlers(),
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.Regex("^🏠 Accueil$"), open_user_home),
+        ] + menu_handlers(),
         states={
             CHOOSE_ENTRY: [
                 MessageHandler(filters.LOCATION, entry_location),
@@ -1802,6 +1844,7 @@ def build_application():
                 CallbackQueryHandler(choose_city_callback, pattern=r"^CITY:"),
                 CallbackQueryHandler(city_page, pattern=r"^CITYPAGE:\d+$"),
                 CallbackQueryHandler(all_cities, pattern=r"^ALLCITIES:\d+$"),
+                MessageHandler(filters.Regex("^🏠 Accueil$"), open_user_home),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_city),
             ],
             CHOOSE_RADIUS: [
