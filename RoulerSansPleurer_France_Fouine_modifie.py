@@ -10,6 +10,7 @@ import html
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -27,20 +28,28 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
+# Aucun secret en clair : tout vient des secrets GitHub (variables d'environnement).
 TOKEN = os.getenv("ROULER_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
+if not TOKEN:
+    raise SystemExit("❌ Secret ROULER_TOKEN manquant (GitHub > Settings > Secrets and variables > Actions).")
 DATA_URL = (
     "https://data.economie.gouv.fr/api/explore/v2.1/catalog/"
     "datasets/prix-des-carburants-en-france-flux-instantane-v2/records"
 )
 GEO_URL = "https://geo.api.gouv.fr"
+# Lien public (pas un secret) vers le profil d'assistance technique.
+SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/Idravisse777")
 
 TOP_N = 5
 RADII_KM = [5, 10, 20, 40, 100]
@@ -48,6 +57,24 @@ REFRESH_SECONDS = 600
 USERS_FILE = Path("utilisateurs_carburant.json")
 
 FUEL_LABELS = {
+    "Gazole": "Gazole",
+    "SP95-E10": "E10",
+    "SP95": "SP95",
+    "SP98": "SP98",
+    "E85": "E85",
+    "GPLc": "GPLc",
+}
+
+FUEL_FIELD = {
+    "Gazole": "gazole_prix",
+    "SP95-E10": "e10_prix",
+    "SP95": "sp95_prix",
+    "SP98": "sp98_prix",
+    "E85": "e85_prix",
+    "GPLc": "gplc_prix",
+}
+# Nom du carburant tel qu'il apparaît dans les champs de rupture de l'API.
+FUEL_API_NAME = {
     "Gazole": "Gazole",
     "SP95-E10": "E10",
     "SP95": "SP95",
@@ -163,8 +190,14 @@ def user_profile(chat_id):
             "last_signature": None,
             "sort_mode": "price",
             "mode_fouine": False,
+            "joined_at": time.strftime("%Y-%m-%d %H:%M"),
+            "role": "user",
+            "banned": False,
         }
     users[key].setdefault("mode_fouine", False)
+    users[key].setdefault("joined_at", None)
+    users[key].setdefault("role", "user")
+    users[key].setdefault("banned", False)
     users[key].setdefault("username", None)
     users[key].setdefault("first_name", None)
     users[key].setdefault("last_name", None)
@@ -289,18 +322,111 @@ def fuel_keyboard():
     ])
 
 
-def main_keyboard():
+def is_admin(chat_id):
+    """Seul le chat défini dans le secret CHAT_ID est administrateur."""
+    return bool(CHAT_ID) and str(chat_id) == CHAT_ID
+
+
+def _as_set(value):
+    if not value:
+        return set()
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = re.split(r"[;,|]", str(value))
+    return {str(i).strip().lower() for i in items if str(i).strip()}
+
+
+def rupture_kind(f, fuel):
+    """Retourne None (dispo), 'temporaire', 'définitive' ou 'rupture' pour ce carburant."""
+    name = FUEL_API_NAME[fuel].lower()
+    names = {name, fuel.lower()}
+    if names & _as_set(f.get("carburants_rupture_definitive")):
+        return "définitive"
+    if names & _as_set(f.get("carburants_rupture_temporaire")):
+        return "temporaire"
+    if names & _as_set(f.get("carburants_indisponibles")):
+        return "rupture"
+    prefix = FUEL_FIELD[fuel][:-5]
+    rtype = f.get(f"{prefix}_rupture_type")
+    if rtype:
+        return "définitive" if "def" in str(rtype).lower() else "temporaire"
+    return None
+
+
+async def shortages_for_user(p, show=3):
+    """Stations en rupture du carburant choisi dans le rayon. None si indisponible."""
+    try:
+        label = FUEL_API_NAME[p["fuel"]]
+        where = (
+            f"within_distance(geom, geom'POINT({p['lon']} {p['lat']})', {p['radius']} km) "
+            f'and carburants_indisponibles like "{label}"'
+        )
+        async with aiohttp.ClientSession() as session:
+            data = await get_json(session, DATA_URL, {"where": where, "limit": 50})
+        stations = []
+        for rec in data.get("results", []):
+            f = rec.get("fields", rec)
+            geom = f.get("geom")
+            try:
+                lon, lat = float(geom[0]), float(geom[1])
+                dist = haversine_km(p["lat"], p["lon"], lat, lon)
+            except Exception:
+                dist = None
+            stations.append({
+                "ville": f.get("ville", ""),
+                "adresse": f.get("adresse", ""),
+                "cp": f.get("cp", ""),
+                "distance": dist,
+                "kind": rupture_kind(f, p["fuel"]) or "rupture",
+                "others": sorted(
+                    {x.strip() for x in re.split(r"[;,|]", ";".join(
+                        f.get("carburants_indisponibles") if isinstance(f.get("carburants_indisponibles"), list)
+                        else [str(f.get("carburants_indisponibles") or "")]
+                    )) if x.strip()} - {FUEL_API_NAME[p["fuel"]]}
+                ),
+            })
+        stations.sort(key=lambda s: (s["distance"] is None, s["distance"] or 0))
+        return {"total": data.get("total_count", len(stations)), "stations": stations[:show]}
+    except Exception as exc:
+        print("[RUPTURES] indisponible :", exc)
+        return None
+
+
+def shortage_block(p, shortages):
+    if not shortages or not shortages.get("total"):
+        return ""
+    text = (
+        f"🚨 <b>Rupture de {html.escape(p['fuel'])}</b> : "
+        f"{shortages['total']} station(s) dans ton rayon\n"
+    )
+    for s in shortages["stations"]:
+        dist = f" • {s['distance']:.1f} km" if s["distance"] is not None else ""
+        kind = "" if s["kind"] == "rupture" else f" ({s['kind']})"
+        text += (
+            f"⛔ {html.escape(s['ville'])} — {html.escape(s['adresse'])}"
+            f"{dist}{kind}\n"
+        )
+    return text + "\n"
+
+
+def main_keyboard(chat_id=None):
+    admin_row = (
+        [[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
+        if is_staff(chat_id) else []
+    )
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("⛽ Voir les prix", callback_data="PRICES"),
             InlineKeyboardButton("📍 Plus proche", callback_data="NEAREST"),
         ],
         [InlineKeyboardButton("💶 Moins cher", callback_data="PRICES")],
+        [InlineKeyboardButton("🚨 Stations en rupture", callback_data="RUPTURES")],
         [InlineKeyboardButton("🔄 Actualiser maintenant", callback_data="PRICES")],
         [InlineKeyboardButton("⚙️ Modifier ma localisation", callback_data="SET_LOCATION")],
         [InlineKeyboardButton("⛽ Modifier le carburant", callback_data="SET_FUEL")],
         [InlineKeyboardButton("🦡 Mode Fouine", callback_data="FOUINE")],
-    ])
+    ] + admin_row)
 
 
 async def toggle_fouine(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,16 +447,37 @@ async def toggle_fouine(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Retour au mode normal : tu recevras uniquement les alertes lorsqu'un prix change."
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(q.message.chat.id),
     )
     return MAIN_MENU
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    context.user_data.pop("adm_awaiting", None)
+    is_new = str(chat_id) not in users
     p = user_profile(chat_id)
     update_user_identity(update.effective_user, p)
     save_users()
+
+    # Notification au propriétaire quand quelqu'un rejoint le bot.
+    if is_new and CHAT_ID and not is_admin(chat_id):
+        try:
+            await context.bot.send_message(
+                chat_id=int(CHAT_ID),
+                text=(
+                    "🆕 <b>Nouvel utilisateur</b>\n\n"
+                    f"👤 {html.escape(user_label(p))}\n"
+                    f"🆔 <code>{chat_id}</code>\n"
+                    f"👥 Total : {len(users)}"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👤 Voir le profil", callback_data=f"ADM:U:{chat_id}")]
+                ]),
+            )
+        except Exception as exc:
+            print("[BOT] notification nouvel utilisateur impossible :", exc)
 
     await update.message.reply_text(
         "🇫🇷 <b>ROULER SANS PLEURER — FRANCE</b>\n\n"
@@ -339,6 +486,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "d'une ville.",
         parse_mode=ParseMode.HTML,
         reply_markup=entry_mode_keyboard(),
+    )
+    # Telegram n'autorise qu'un seul type de clavier par message : le bouton
+    # d'assistance est donc envoyé juste dessous, dans un second message.
+    await update.message.reply_text(
+        "⛑️ Un souci ou une question ?",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⛑️ Assistance technique", url=SUPPORT_URL)]]
+            + ([[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
+               if is_staff(chat_id) else [])
+        ),
     )
     return CHOOSE_ENTRY
 
@@ -524,6 +681,8 @@ async def all_cities(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def enter_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("adm_awaiting"):
+        return ENTER_CITY  # le texte est destiné à une annonce admin
     city_name = update.message.text.strip()
     if len(city_name) < 2:
         await update.message.reply_text("❌ Nom de ville trop court. Réessaie.")
@@ -635,7 +794,7 @@ async def choose_fuel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(
         profile_text(p),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(q.message.chat.id),
     )
     return MAIN_MENU
 
@@ -666,14 +825,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 
 async def prices_for_user(p, sort_by="price"):
-    fuel_field = {
-        "Gazole": "gazole_prix",
-        "SP95-E10": "e10_prix",
-        "SP95": "sp95_prix",
-        "SP98": "sp98_prix",
-        "E85": "e85_prix",
-        "GPLc": "gplc_prix",
-    }[p["fuel"]]
+    fuel_field = FUEL_FIELD[p["fuel"]]
 
     # IMPORTANT : l'API utilise geom en vraies coordonnées GPS
     # (longitude, latitude), tandis que les champs latitude/longitude
@@ -688,10 +840,6 @@ async def prices_for_user(p, sort_by="price"):
         "where": where,
         "limit": 100,
         "order_by": f"{fuel_field} asc",
-        "select": (
-            "id,latitude,longitude,geom,cp,adresse,ville,"
-            f"{fuel_field},prix"
-        ),
     }
 
     async with aiohttp.ClientSession() as session:
@@ -707,6 +855,10 @@ async def prices_for_user(p, sort_by="price"):
             continue
 
         if price <= 0:
+            continue
+
+        # Station en rupture pour ce carburant : on ne la propose pas.
+        if rupture_kind(f, p["fuel"]):
             continue
 
         # Utilise geom en priorité : [longitude, latitude] en coordonnées GPS.
@@ -760,7 +912,7 @@ def maps_url(station):
     return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(query)
 
 
-def format_prices(p, stations, sort_by="price"):
+def format_prices(p, stations, sort_by="price", shortages=None):
     fuel = p["fuel"]
     title = (
         "🇫🇷 <b>ROULER SANS PLEURER — FRANCE</b>\n"
@@ -772,6 +924,7 @@ def format_prices(p, stations, sort_by="price"):
     if not stations:
         return (
             title + f"\n⛽ <b>{html.escape(fuel.upper())}</b>\n❌ Aucun prix disponible.\n\n"
+            + shortage_block(p, shortages) +
             "━━━━━━━━━━━━━━━━━━━━\n"
             "🕐 Prix = dernier relevé disponible\n"
             + AUTO_CHECK_FOOTER
@@ -796,6 +949,7 @@ def format_prices(p, stations, sort_by="price"):
 
         text += f'<a href="{maps_url(s)}">🗺️ Ouvrir dans Google Maps</a>\n\n'
 
+    text += shortage_block(p, shortages)
     text += (
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🕐 Prix = dernier relevé disponible\n"
@@ -820,11 +974,55 @@ async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await q.edit_message_text("❌ Impossible de récupérer les stations actuellement.")
         return MAIN_MENU
+    shortages = await shortages_for_user(p)
     await q.edit_message_text(
-        format_prices(p, stations, sort_by="distance"),
+        format_prices(p, stations, sort_by="distance", shortages=shortages),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(q.message.chat.id),
+    )
+    return MAIN_MENU
+
+
+async def show_ruptures(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("Recherche des ruptures…")
+    p = user_profile(q.message.chat.id)
+    if not p["city"] or p["lat"] is None:
+        await q.edit_message_text("❌ Configure d'abord ta localisation avec /start.")
+        return MAIN_MENU
+
+    sh = await shortages_for_user(p, show=10)
+    if sh is None:
+        text = "❌ Impossible de récupérer les ruptures actuellement.\nRéessaie dans quelques secondes."
+    elif not sh["total"]:
+        text = (
+            f"✅ <b>Aucune rupture de {html.escape(p['fuel'])}</b> signalée "
+            f"dans un rayon de {p['radius']} km autour de {html.escape(p['city'])}."
+        )
+    else:
+        text = (
+            f"🚨 <b>Ruptures de {html.escape(p['fuel'])}</b>\n"
+            f"📍 {html.escape(p['city'])} + rayon de {p['radius']} km\n"
+            f"{sh['total']} station(s) concernée(s) :\n\n"
+        )
+        for st in sh["stations"]:
+            dist = f" • {st['distance']:.1f} km" if st["distance"] is not None else ""
+            kind = "" if st["kind"] == "rupture" else f" ({st['kind']})"
+            text += (
+                f"⛔ <b>{html.escape(st['ville'])}</b>{dist}{kind}\n"
+                f"📍 {html.escape(st['adresse'])}, {html.escape(st['cp'])}\n"
+            )
+            if st["others"]:
+                text += f"Aussi indisponible : {html.escape(', '.join(st['others']))}\n"
+            text += f'<a href="{maps_url(st)}">🗺️ Ouvrir dans Google Maps</a>\n\n'
+        if sh["total"] > len(sh["stations"]):
+            text += f"… et {sh['total'] - len(sh['stations'])} autre(s), plus éloignée(s).\n"
+    await q.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=main_keyboard(q.message.chat.id),
     )
     return MAIN_MENU
 
@@ -851,11 +1049,12 @@ async def show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return MAIN_MENU
 
+    shortages = await shortages_for_user(p)
     await q.edit_message_text(
-        format_prices(p, stations),
+        format_prices(p, stations, shortages=shortages),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(q.message.chat.id),
     )
     return MAIN_MENU
 
@@ -890,17 +1089,390 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ───────────────────────── Administration ─────────────────────────
+# Hiérarchie : owner (secret CHAT_ID, intouchable) > admin > moderator > user.
+# Le rôle "owner" ne vient QUE du secret CHAT_ID : aucune valeur du fichier JSON
+# ne peut le donner. Un rôle ne peut jamais agir sur un rôle égal ou supérieur.
+ROLE_RANK = {"user": 0, "moderator": 1, "admin": 2, "owner": 3}
+ROLE_NAME = {
+    "owner": "Propriétaire",
+    "admin": "Administrateur",
+    "moderator": "Modérateur",
+    "user": "Utilisateur",
+}
+ROLE_ICON = {"owner": "💎", "admin": "👑", "moderator": "🛡️", "user": "👤"}
+ADM_PAGE_SIZE = 8
+
+
+def role_of(chat_id):
+    if is_admin(chat_id):
+        return "owner"
+    p = users.get(str(chat_id))
+    if not p or p.get("banned"):
+        return "user"
+    r = p.get("role")
+    return r if r in ("moderator", "admin") else "user"
+
+
+def rank_of(chat_id):
+    return ROLE_RANK[role_of(chat_id)]
+
+
+def is_staff(chat_id):
+    return rank_of(chat_id) >= 1
+
+
+def user_label(p):
+    name = " ".join(x for x in [p.get("first_name"), p.get("last_name")] if x).strip()
+    tag = f"@{p['username']}" if p.get("username") else ""
+    label = " ".join(x for x in [name, tag] if x)
+    return label or f"ID {p.get('chat_id')}"
+
+
+def _is_owner_id(target_id):
+    return bool(CHAT_ID) and str(target_id) == CHAT_ID
+
+
+def can_ban(actor_id, target_id):
+    if _is_owner_id(target_id) or str(actor_id) == str(target_id):
+        return False
+    ar = rank_of(actor_id)
+    return ar >= 1 and ar > rank_of(target_id)
+
+
+def can_delete(actor_id, target_id):
+    if _is_owner_id(target_id) or str(actor_id) == str(target_id):
+        return False
+    ar = rank_of(actor_id)
+    return ar >= 2 and ar > rank_of(target_id)
+
+
+def can_set_role(actor_id, target_id, new_role):
+    if new_role not in ("user", "moderator", "admin"):
+        return False
+    if _is_owner_id(target_id) or str(actor_id) == str(target_id):
+        return False
+    t = users.get(str(target_id))
+    if not t or (t.get("banned") and new_role != "user"):
+        return False
+    ar, tr = rank_of(actor_id), rank_of(target_id)
+    if ar >= 3:
+        return True
+    if ar == 2:
+        return new_role in ("user", "moderator") and tr < 2
+    return False
+
+
+async def block_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bloque toute interaction d'un utilisateur exclu (jamais le propriétaire)."""
+    chat = update.effective_chat
+    if not chat or is_admin(chat.id):
+        return
+    p = users.get(str(chat.id))
+    if p and p.get("banned"):
+        try:
+            if update.callback_query:
+                await update.callback_query.answer("⛔ Accès refusé.", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("⛔️ Ton accès au bot a été révoqué.")
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
+
+
+ROLE_MESSAGES = {
+    "admin": (
+        "👑 <b>Tu as été nommé Administrateur.</b>\n\n"
+        "Tu peux gérer les utilisateurs et les modérateurs.\n"
+        "Envoie /start pour voir le bouton ⚙️ Administration."
+    ),
+    "moderator": (
+        "🛡️ <b>Tu as été nommé Modérateur.</b>\n\n"
+        "Tu peux révoquer et restaurer l'accès des utilisateurs.\n"
+        "Envoie /start pour voir le bouton ⚙️ Administration."
+    ),
+    "user": (
+        "👤 <b>Ton rôle a été retiré.</b>\n\n"
+        "Tu es redevenu utilisateur lambda."
+    ),
+}
+
+
+async def notify_user(context, target_id, text):
+    """Prévient la personne concernée (échec silencieux si le bot est bloqué)."""
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_id), text=text, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        print(f"[BOT] notification à {target_id} impossible :", exc)
+
+
+def panel_text():
+    total = len(users)
+    banned = sum(1 for p in users.values() if p.get("banned"))
+    staff = sum(1 for p in users.values() if p.get("role") in ("moderator", "admin"))
+    return (
+        "⚙️ <b>Administration</b>\n\n"
+        f"👥 Utilisateurs : <b>{total}</b>\n"
+        f"⛔️ Révoqués : <b>{banned}</b>\n"
+        f"👑🛡️ Équipe (modérateurs / admins) : <b>{staff}</b>"
+    )
+
+
+def panel_keyboard(actor_id):
+    rows = [[InlineKeyboardButton("👥 Utilisateurs", callback_data="ADM:LIST:0")]]
+    if is_admin(actor_id):
+        rows.append([InlineKeyboardButton("📢 Annonce à tous", callback_data="ADM:ANN")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _sorted_user_ids():
+    def key(item):
+        cid, p = item
+        return (-rank_of(cid), p.get("joined_at") or "", cid)
+    return [cid for cid, _ in sorted(users.items(), key=key)]
+
+
+def list_view(actor_id, page):
+    ids = _sorted_user_ids()
+    pages = max(1, math.ceil(len(ids) / ADM_PAGE_SIZE))
+    page = max(0, min(page, pages - 1))
+    chunk = ids[page * ADM_PAGE_SIZE:(page + 1) * ADM_PAGE_SIZE]
+    rows = []
+    for cid in chunk:
+        p = users[cid]
+        icon = "⛔️" if p.get("banned") else ROLE_ICON[role_of(cid)]
+        rows.append([InlineKeyboardButton(
+            f"{icon} {user_label(p)}"[:45], callback_data=f"ADM:U:{cid}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"ADM:LIST:{page-1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"ADM:LIST:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("↩️ Retour", callback_data="ADM:PANEL")])
+    text = f"👥 <b>Utilisateurs</b> ({len(ids)}) — page {page+1}/{pages}"
+    return text, InlineKeyboardMarkup(rows)
+
+
+def detail_view(actor_id, tid):
+    p = users[tid]
+    role = role_of(tid)
+    status = "⛔️ Accès révoqué" if p.get("banned") else "✅ Actif"
+    text = (
+        f"{ROLE_ICON[role]} <b>{html.escape(user_label(p))}</b>\n\n"
+        f"ID : <code>{html.escape(str(tid))}</code>\n"
+        f"Rôle : {ROLE_NAME[role]}\n"
+        f"Statut : {status}\n"
+        f"Inscrit : {html.escape(p.get('joined_at') or 'inconnu')}\n"
+        f"Ville : {html.escape(p.get('city') or '—')}\n"
+        f"Carburant : {html.escape(p.get('fuel') or '—')}"
+    )
+    rows = []
+    if can_ban(actor_id, tid):
+        if p.get("banned"):
+            rows.append([InlineKeyboardButton("✅ Restaurer l'accès", callback_data=f"ADM:UNBAN:{tid}")])
+        else:
+            rows.append([InlineKeyboardButton("⛔️ Révoquer l'accès", callback_data=f"ADM:BAN:{tid}")])
+    if role != "moderator" and can_set_role(actor_id, tid, "moderator"):
+        rows.append([InlineKeyboardButton("🛡️ Nommer modérateur", callback_data=f"ADM:ROLE:{tid}:moderator")])
+    if role != "admin" and can_set_role(actor_id, tid, "admin"):
+        rows.append([InlineKeyboardButton("👑 Nommer administrateur", callback_data=f"ADM:ROLE:{tid}:admin")])
+    if role != "user" and can_set_role(actor_id, tid, "user"):
+        rows.append([InlineKeyboardButton("⬇️ Retirer le rôle", callback_data=f"ADM:ROLE:{tid}:user")])
+    if can_delete(actor_id, tid):
+        rows.append([InlineKeyboardButton("🗑️ Supprimer", callback_data=f"ADM:DEL:{tid}")])
+    rows.append([InlineKeyboardButton("↩️ Liste", callback_data="ADM:LIST:0")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _show(q, text, markup):
+    await q.edit_message_text(
+        text, parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True, reply_markup=markup,
+    )
+
+
+async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    actor = q.from_user.id
+    if not is_staff(actor):
+        await q.answer("⛔ Réservé à l'équipe d'administration.", show_alert=True)
+        return
+    parts = q.data.split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else None
+
+    # Ouvre le panneau dans un NOUVEAU message : le menu principal reste intact.
+    if act == "HOME":
+        await q.answer()
+        await q.message.reply_text(
+            panel_text(), parse_mode=ParseMode.HTML, reply_markup=panel_keyboard(actor))
+        return
+    if act == "PANEL":
+        await q.answer()
+        await _show(q, panel_text(), panel_keyboard(actor))
+        return
+    if act == "LIST":
+        await q.answer()
+        text, markup = list_view(actor, int(arg or 0))
+        await _show(q, text, markup)
+        return
+
+    # ── Annonce (propriétaire uniquement) ──
+    if act in ("ANN", "ANNSEND", "ANNCANCEL"):
+        if not is_admin(actor):
+            await q.answer("⛔ Réservé au propriétaire.", show_alert=True)
+            return
+        if act == "ANN":
+            await q.answer()
+            context.user_data["adm_awaiting"] = "announce"
+            await _show(
+                q,
+                "📢 <b>Annonce à tous les utilisateurs</b>\n\n"
+                "Écris ton message maintenant (un seul message). "
+                "Tu pourras le relire avant l'envoi.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annuler", callback_data="ADM:ANNCANCEL")]]),
+            )
+        elif act == "ANNCANCEL":
+            await q.answer("Annulé")
+            context.user_data.pop("adm_awaiting", None)
+            context.user_data.pop("announce_html", None)
+            await _show(q, panel_text(), panel_keyboard(actor))
+        else:
+            await q.answer("Envoi en cours…")
+            body = context.user_data.pop("announce_html", None)
+            if not body:
+                await _show(q, "❌ Annonce expirée. Recommence.", panel_keyboard(actor))
+                return
+            sent = failed = 0
+            for cid, p in list(users.items()):
+                if p.get("banned"):
+                    continue
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(cid),
+                        text="📢 <b>Annonce</b>\n\n" + body,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                    sent += 1
+                except Exception:
+                    failed += 1
+                await asyncio.sleep(0.05)  # reste sous les limites d'envoi de Telegram
+            await _show(
+                q,
+                f"✅ Annonce envoyée à <b>{sent}</b> utilisateur(s)."
+                + (f"\n⚠️ {failed} échec(s) (bot bloqué ou chat supprimé)." if failed else ""),
+                panel_keyboard(actor),
+            )
+        return
+
+    # ── Actions sur un utilisateur ──
+    tid = arg
+    if tid not in users:
+        await q.answer("Utilisateur introuvable.", show_alert=True)
+        text, markup = list_view(actor, 0)
+        await _show(q, text, markup)
+        return
+
+    if act == "U":
+        await q.answer()
+        text, markup = detail_view(actor, tid)
+        await _show(q, text, markup)
+    elif act in ("BAN", "UNBAN"):
+        if not can_ban(actor, tid):
+            await q.answer("⛔ Tu n'as pas le droit d'agir sur cet utilisateur.", show_alert=True)
+            return
+        users[tid]["banned"] = (act == "BAN")
+        if act == "BAN":
+            users[tid]["last_signature"] = None
+        save_users()
+        await q.answer("⛔️ Accès révoqué" if act == "BAN" else "✅ Accès restauré")
+        await notify_user(
+            context, tid,
+            "⛔️ <b>Ton accès au bot a été révoqué.</b>" if act == "BAN"
+            else "✅ <b>Ton accès au bot a été restauré.</b>\nEnvoie /start pour reprendre.",
+        )
+        text, markup = detail_view(actor, tid)
+        await _show(q, text, markup)
+    elif act == "ROLE":
+        new_role = parts[3] if len(parts) > 3 else ""
+        if not can_set_role(actor, tid, new_role):
+            await q.answer("⛔ Tu n'as pas le droit de faire ça.", show_alert=True)
+            return
+        users[tid]["role"] = new_role
+        save_users()
+        await q.answer(f"{ROLE_NAME[new_role]} ✔")
+        await notify_user(context, tid, ROLE_MESSAGES[new_role])
+        text, markup = detail_view(actor, tid)
+        await _show(q, text, markup)
+    elif act == "DEL":
+        if not can_delete(actor, tid):
+            await q.answer("⛔ Tu n'as pas le droit de supprimer cet utilisateur.", show_alert=True)
+            return
+        await q.answer()
+        await _show(
+            q,
+            f"🗑️ Supprimer <b>{html.escape(user_label(users[tid]))}</b> ?\n"
+            "Son profil sera effacé (il pourra se réinscrire avec /start).",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Oui, supprimer", callback_data=f"ADM:DELOK:{tid}")],
+                [InlineKeyboardButton("❌ Non", callback_data=f"ADM:U:{tid}")],
+            ]),
+        )
+    elif act == "DELOK":
+        if not can_delete(actor, tid):
+            await q.answer("⛔ Tu n'as pas le droit de supprimer cet utilisateur.", show_alert=True)
+            return
+        users.pop(tid, None)
+        save_users()
+        await q.answer("🗑️ Supprimé")
+        await notify_user(
+            context, tid,
+            "🗑️ <b>Ton profil a été supprimé.</b>\nTu peux te réinscrire avec /start.")
+        text, markup = list_view(actor, 0)
+        await _show(q, text, markup)
+    else:
+        await q.answer()
+
+
+async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Réceptionne le texte d'une annonce (propriétaire uniquement)."""
+    if context.user_data.get("adm_awaiting") != "announce":
+        return
+    if not is_admin(update.effective_chat.id):
+        context.user_data.pop("adm_awaiting", None)
+        return
+    context.user_data.pop("adm_awaiting", None)
+    context.user_data["announce_html"] = update.message.text_html
+    total = sum(1 for p in users.values() if not p.get("banned"))
+    await update.message.reply_text(
+        "📢 <b>Aperçu de l'annonce :</b>\n\n" + update.message.text_html,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Envoyer à {total} utilisateur(s)", callback_data="ADM:ANNSEND")],
+            [InlineKeyboardButton("❌ Annuler", callback_data="ADM:ANNCANCEL")],
+        ]),
+    )
+
+
 async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
     # Une vérification toutes les 10 minutes.
     for chat_id, p in list(users.items()):
+        if p.get("banned"):
+            continue
         if p.get("lat") is None or not p.get("city") or not p.get("fuel"):
             continue
 
         try:
             stations = await prices_for_user(p, sort_by=p.get("sort_mode", "price"))
+            shortages = await shortages_for_user(p)
             signature = "|".join(
                 [p.get("sort_mode", "price")] +
-                [f"{s['id']}:{s['price']:.3f}" for s in stations]
+                [f"{s['id']}:{s['price']:.3f}" for s in stations] +
+                ([f"R:{shortages['total']}"] if shortages and shortages.get("total") else [])
             )
 
             if p.get("last_signature") is None:
@@ -920,7 +1492,7 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
                         else
                         "🔔 <b>Mise à jour des prix</b>\n\n"
                     ) +
-                    format_prices(p, stations, sort_by=p.get("sort_mode", "price")),
+                    format_prices(p, stations, sort_by=p.get("sort_mode", "price"), shortages=shortages),
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
@@ -931,6 +1503,15 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     load_users()
+    # Notification de démarrage envoyée au CHAT_ID (secret GitHub), si défini.
+    if CHAT_ID:
+        try:
+            await application.bot.send_message(
+                chat_id=int(CHAT_ID),
+                text="🟢 RoulerSansPleurer démarré.",
+            )
+        except Exception as exc:
+            print("[BOT] notification de démarrage impossible :", exc)
 
 
 def build_application():
@@ -969,6 +1550,7 @@ def build_application():
             MAIN_MENU: [
                 CallbackQueryHandler(show_prices, pattern=r"^PRICES$"),
                 CallbackQueryHandler(show_nearest, pattern=r"^NEAREST$"),
+                CallbackQueryHandler(show_ruptures, pattern=r"^RUPTURES$"),
                 CallbackQueryHandler(set_location, pattern=r"^SET_LOCATION$"),
                 CallbackQueryHandler(set_fuel, pattern=r"^SET_FUEL$"),
                 CallbackQueryHandler(toggle_fouine, pattern=r"^FOUINE$"),
@@ -978,6 +1560,11 @@ def build_application():
         allow_reentry=True,
     )
 
+    # Garde-fou : bloque les utilisateurs exclus avant tout autre traitement.
+    app.add_handler(TypeHandler(Update, block_banned), group=-1)
+    # Administration : indépendante de l'état de la conversation principale.
+    app.add_handler(CallbackQueryHandler(adm_router, pattern=r"^ADM:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=1)
     app.add_handler(conv)
     app.job_queue.run_repeating(price_check_job, interval=REFRESH_SECONDS, first=10)
     return app
