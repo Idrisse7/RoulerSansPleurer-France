@@ -191,11 +191,13 @@ def user_profile(chat_id):
             "sort_mode": "price",
             "mode_fouine": False,
             "joined_at": time.strftime("%Y-%m-%d %H:%M"),
+            "saved": [],
             "role": "user",
             "banned": False,
         }
     users[key].setdefault("mode_fouine", False)
     users[key].setdefault("joined_at", None)
+    users[key].setdefault("saved", [])
     users[key].setdefault("role", "user")
     users[key].setdefault("banned", False)
     users[key].setdefault("username", None)
@@ -425,6 +427,10 @@ def main_keyboard(chat_id=None):
         [InlineKeyboardButton("🔄 Actualiser maintenant", callback_data="PRICES")],
         [InlineKeyboardButton("⚙️ Modifier ma localisation", callback_data="SET_LOCATION")],
         [InlineKeyboardButton("⛽ Modifier le carburant", callback_data="SET_FUEL")],
+        [
+            InlineKeyboardButton("💾 Enregistrer cette recherche", callback_data="SAVE_SEARCH"),
+        ],
+        [InlineKeyboardButton("📂 Mes recherches", callback_data="MY_SEARCHES")],
         [InlineKeyboardButton("🦡 Mode Fouine", callback_data="FOUINE")],
     ] + admin_row)
 
@@ -479,23 +485,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             print("[BOT] notification nouvel utilisateur impossible :", exc)
 
+    # Message principal : texte + boutons larges (assistance / administration).
     await update.message.reply_text(
         "🇫🇷 <b>ROULER SANS PLEURER — FRANCE</b>\n\n"
         "📍 Comment veux-tu renseigner ta position ?\n"
         "Le partage GPS donne des résultats plus précis que le choix manuel "
-        "d'une ville.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=entry_mode_keyboard(),
-    )
-    # Telegram n'autorise qu'un seul type de clavier par message : le bouton
-    # d'assistance est donc envoyé juste dessous, dans un second message.
-    await update.message.reply_text(
+        "d'une ville.\n\n"
         "⛑️ Un souci ou une question ?",
+        parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⛑️ Assistance technique", url=SUPPORT_URL)]]
             + ([[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
                if is_staff(chat_id) else [])
         ),
+    )
+    # Telegram n'autorise qu'un seul type de clavier par message : les boutons
+    # de position (clavier normal) sont donc portés par ce court message.
+    await update.message.reply_text(
+        "👇 Choisis une option :",
+        reply_markup=entry_mode_keyboard(),
     )
     return CHOOSE_ENTRY
 
@@ -1458,47 +1466,181 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ───────────────── Recherches enregistrées (plusieurs par personne) ─────────────────
+MAX_SAVED = 5
+SAVED_FIELDS = ("city", "lat", "lon", "radius", "fuel", "department", "region")
+
+
+def search_key(s):
+    try:
+        return (s.get("fuel"), round(float(s["lat"]), 4), round(float(s["lon"]), 4), s.get("radius"))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def search_name(s):
+    return f"{s.get('fuel', '?')} · {s.get('city', '?')} · {s.get('radius', '?')} km"
+
+
+async def save_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    p = user_profile(q.message.chat.id)
+    if not p.get("city") or p.get("lat") is None or not p.get("fuel"):
+        await q.answer("Configure d'abord ta recherche (ville + carburant).", show_alert=True)
+        return MAIN_MENU
+    saved = p.setdefault("saved", [])
+    key = search_key(p)
+    if any(search_key(e) == key for e in saved):
+        await q.answer("✅ Cette recherche est déjà enregistrée.", show_alert=True)
+        return MAIN_MENU
+    if len(saved) >= MAX_SAVED:
+        await q.answer(
+            f"Maximum {MAX_SAVED} recherches. Supprime-en une dans « Mes recherches ».",
+            show_alert=True,
+        )
+        return MAIN_MENU
+    entry = {k: p.get(k) for k in SAVED_FIELDS}
+    entry["id"] = str(max([int(e["id"]) for e in saved if str(e.get("id", "")).isdigit()] + [0]) + 1)
+    entry["last_signature"] = None
+    saved.append(entry)
+    save_users()
+    await q.answer(f"💾 Enregistrée : {search_name(entry)}", show_alert=True)
+    return MAIN_MENU
+
+
+def searches_view(p):
+    saved = p.get("saved", [])
+    active = search_key(p)
+    rows = []
+    for e in saved:
+        mark = "✅ " if search_key(e) == active else ""
+        rows.append([
+            InlineKeyboardButton(f"{mark}⛽ {search_name(e)}"[:50], callback_data=f"SS:{e['id']}"),
+            InlineKeyboardButton("🗑️", callback_data=f"SD:{e['id']}"),
+        ])
+    rows.append([InlineKeyboardButton("↩️ Retour au menu", callback_data="MENU")])
+    if saved:
+        text = (
+            "📂 <b>Mes recherches</b>\n\n"
+            "Touche une recherche pour voir les prix tout de suite.\n"
+            "Tu recevras aussi une alerte quand les prix de chacune changent.\n"
+            f"({len(saved)}/{MAX_SAVED})"
+        )
+    else:
+        text = (
+            "📂 <b>Mes recherches</b>\n\n"
+            "Aucune recherche enregistrée.\n"
+            "Configure une ville et un carburant, puis touche "
+            "« 💾 Enregistrer cette recherche »."
+        )
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def my_searches(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    p = user_profile(q.message.chat.id)
+    text, markup = searches_view(p)
+    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    return MAIN_MENU
+
+
+async def select_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    p = user_profile(q.message.chat.id)
+    sid = q.data.split(":", 1)[1]
+    entry = next((e for e in p.get("saved", []) if str(e.get("id")) == sid), None)
+    if not entry:
+        await q.answer("Recherche introuvable.", show_alert=True)
+        text, markup = searches_view(p)
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return MAIN_MENU
+    for k in SAVED_FIELDS:
+        p[k] = entry.get(k)
+    p["latitude"], p["longitude"] = p.get("lat"), p.get("lon")
+    p["sort_mode"] = "price"
+    reset_price_signature(p)
+    save_users()
+    return await show_prices(update, context)
+
+
+async def delete_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    p = user_profile(q.message.chat.id)
+    sid = q.data.split(":", 1)[1]
+    p["saved"] = [e for e in p.get("saved", []) if str(e.get("id")) != sid]
+    save_users()
+    await q.answer("🗑️ Supprimée")
+    text, markup = searches_view(p)
+    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    return MAIN_MENU
+
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    p = user_profile(q.message.chat.id)
+    await q.edit_message_text(
+        profile_text(p),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(q.message.chat.id),
+    )
+    return MAIN_MENU
+
+
 async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
-    # Une vérification toutes les 10 minutes.
-    for chat_id, p in list(users.items()):
-        if p.get("banned"):
-            continue
-        if p.get("lat") is None or not p.get("city") or not p.get("fuel"):
+    # Une vérification toutes les 10 minutes : recherche active + recherches enregistrées.
+    for chat_id, profile in list(users.items()):
+        if profile.get("banned"):
             continue
 
-        try:
-            stations = await prices_for_user(p, sort_by=p.get("sort_mode", "price"))
-            shortages = await shortages_for_user(p)
-            signature = "|".join(
-                [p.get("sort_mode", "price")] +
-                [f"{s['id']}:{s['price']:.3f}" for s in stations] +
-                ([f"R:{shortages['total']}"] if shortages and shortages.get("total") else [])
-            )
+        searches = []
+        seen = set()
+        if profile.get("lat") is not None and profile.get("city") and profile.get("fuel"):
+            searches.append((profile, True))
+            seen.add(search_key(profile))
+        for e in profile.get("saved", []):
+            k = search_key(e)
+            if k is None or k in seen or e.get("lat") is None:
+                continue
+            seen.add(k)
+            searches.append((e, False))
 
-            if p.get("last_signature") is None:
-                p["last_signature"] = signature
-                save_users()
-                if not p.get("mode_fouine", False):
-                    continue
-
-            should_send = p.get("mode_fouine", False) or signature != p.get("last_signature")
-            if should_send:
-                p["last_signature"] = signature
-                await context.bot.send_message(
-                    chat_id=int(chat_id),
-                    text=(
-                        "🦡 <b>Mode Fouine — relevé des prix</b>\n\n"
-                        if p.get("mode_fouine", False)
-                        else
-                        "🔔 <b>Mise à jour des prix</b>\n\n"
-                    ) +
-                    format_prices(p, stations, sort_by=p.get("sort_mode", "price"), shortages=shortages),
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
+        for p, is_active in searches:
+            try:
+                fouine = bool(profile.get("mode_fouine", False)) and is_active
+                sort_mode = p.get("sort_mode", "price")
+                stations = await prices_for_user(p, sort_by=sort_mode)
+                shortages = await shortages_for_user(p)
+                signature = "|".join(
+                    [sort_mode] +
+                    [f"{s['id']}:{s['price']:.3f}" for s in stations] +
+                    ([f"R:{shortages['total']}"] if shortages and shortages.get("total") else [])
                 )
-                save_users()
-        except Exception:
-            continue
+
+                if p.get("last_signature") is None:
+                    p["last_signature"] = signature
+                    save_users()
+                    if not fouine:
+                        continue
+
+                if fouine or signature != p.get("last_signature"):
+                    p["last_signature"] = signature
+                    await context.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=(
+                            "🦡 <b>Mode Fouine — relevé des prix</b>\n\n"
+                            if fouine
+                            else
+                            "🔔 <b>Mise à jour des prix</b>\n\n"
+                        ) +
+                        format_prices(p, stations, sort_by=sort_mode, shortages=shortages),
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                    save_users()
+            except Exception:
+                continue
 
 
 async def post_init(application: Application):
@@ -1514,11 +1656,29 @@ async def post_init(application: Application):
             print("[BOT] notification de démarrage impossible :", exc)
 
 
+def menu_handlers():
+    return [
+        CallbackQueryHandler(show_prices, pattern=r"^PRICES$"),
+        CallbackQueryHandler(show_nearest, pattern=r"^NEAREST$"),
+        CallbackQueryHandler(show_ruptures, pattern=r"^RUPTURES$"),
+        CallbackQueryHandler(set_location, pattern=r"^SET_LOCATION$"),
+        CallbackQueryHandler(set_fuel, pattern=r"^SET_FUEL$"),
+        CallbackQueryHandler(toggle_fouine, pattern=r"^FOUINE$"),
+        CallbackQueryHandler(save_search, pattern=r"^SAVE_SEARCH$"),
+        CallbackQueryHandler(my_searches, pattern=r"^MY_SEARCHES$"),
+        CallbackQueryHandler(select_search, pattern=r"^SS:\d+$"),
+        CallbackQueryHandler(delete_search, pattern=r"^SD:\d+$"),
+        CallbackQueryHandler(back_to_menu, pattern=r"^MENU$"),
+    ]
+
+
 def build_application():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        # Les boutons du menu sont aussi des points d'entrée : ils marchent
+        # même après un redémarrage du bot, sans refaire /start.
+        entry_points=[CommandHandler("start", start)] + menu_handlers(),
         states={
             CHOOSE_ENTRY: [
                 MessageHandler(filters.LOCATION, entry_location),
@@ -1547,14 +1707,7 @@ def build_application():
             CHOOSE_FUEL: [
                 CallbackQueryHandler(choose_fuel, pattern=r"^FUEL:"),
             ],
-            MAIN_MENU: [
-                CallbackQueryHandler(show_prices, pattern=r"^PRICES$"),
-                CallbackQueryHandler(show_nearest, pattern=r"^NEAREST$"),
-                CallbackQueryHandler(show_ruptures, pattern=r"^RUPTURES$"),
-                CallbackQueryHandler(set_location, pattern=r"^SET_LOCATION$"),
-                CallbackQueryHandler(set_fuel, pattern=r"^SET_FUEL$"),
-                CallbackQueryHandler(toggle_fouine, pattern=r"^FOUINE$"),
-            ],
+            MAIN_MENU: menu_handlers(),
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
