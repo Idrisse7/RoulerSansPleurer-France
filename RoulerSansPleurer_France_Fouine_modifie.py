@@ -1822,10 +1822,11 @@ def build_application():
         # même après un redémarrage du bot, sans refaire /start.
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex("^🏠 Accueil$"), open_user_home),
+            MessageHandler(filters.Regex("^🏠 Accueil$"), start),
         ] + menu_handlers(),
         states={
             CHOOSE_ENTRY: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 MessageHandler(filters.LOCATION, entry_location),
                 MessageHandler(
                     filters.Regex("^🗺️ Choisir ma ville manuellement$"),
@@ -1833,27 +1834,34 @@ def build_application():
                 ),
             ],
             CHOOSE_REGION: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 CallbackQueryHandler(region_page, pattern=r"^REGPAGE:\d+$"),
                 CallbackQueryHandler(choose_region, pattern=r"^REG:"),
             ],
             CHOOSE_DEPARTMENT: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 CallbackQueryHandler(department_page, pattern=r"^DEPPAGE:\d+$"),
                 CallbackQueryHandler(choose_department, pattern=r"^DEP:"),
             ],
             ENTER_CITY: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 CallbackQueryHandler(choose_city_callback, pattern=r"^CITY:"),
                 CallbackQueryHandler(city_page, pattern=r"^CITYPAGE:\d+$"),
                 CallbackQueryHandler(all_cities, pattern=r"^ALLCITIES:\d+$"),
-                MessageHandler(filters.Regex("^🏠 Accueil$"), open_user_home),
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, enter_city),
             ],
             CHOOSE_RADIUS: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 CallbackQueryHandler(choose_radius, pattern=r"^RAD:\d+$"),
             ],
             CHOOSE_FUEL: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
                 CallbackQueryHandler(choose_fuel, pattern=r"^FUEL:"),
             ],
-            MAIN_MENU: menu_handlers(),
+            MAIN_MENU: [
+                MessageHandler(filters.Regex("^🏠 Accueil$"), start),
+            ] + menu_handlers(),
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
