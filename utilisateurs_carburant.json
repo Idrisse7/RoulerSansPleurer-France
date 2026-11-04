@@ -312,7 +312,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38180001:2.099|38320005:2.115|38120001:2.127|38340015:2.129|38340006:2.129|R:5",
+    "last_signature": "price|38180001:2.099|38320005:2.115|38120001:2.127|38340015:2.129|38340006:2.129|R:4",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
