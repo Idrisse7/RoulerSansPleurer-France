@@ -36,9 +36,7 @@
       }
     ],
     "role": "user",
-    "banned": false,
-    "update_pin_message_id": 6026,
-    "update_pin_expires_at": 1793798843.970214
+    "banned": false
   },
   "8615737858": {
     "chat_id": 8615737858,
