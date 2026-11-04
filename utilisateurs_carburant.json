@@ -157,7 +157,7 @@
     "radius": 10,
     "fuel": "SP95-E10",
     "sort_by": "price",
-    "last_signature": "price|38120001:1.951|38320005:1.977|38170004:1.990|38700003:1.990|38600003:1.990|R:3",
+    "last_signature": "price|38120001:1.951|38320005:1.977|38170004:1.990|38700003:1.990|38600003:1.990|R:4",
     "sort_mode": "price",
     "mode_fouine": false,
     "update_pin_message_id": 6034,
