@@ -126,7 +126,7 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|42100022:2.052|42000015:2.090|42270002:2.099|42270004:2.099|42390001:2.134|R:2",
+    "last_signature": "price|42100022:2.052|42000015:2.090|42270002:2.099|42270004:2.099|42390001:2.134|R:3",
     "sort_mode": "price",
     "mode_fouine": false
   },
@@ -312,7 +312,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38320005:2.040|38120001:2.068|38400006:2.094|38800003:2.095|38170004:2.095|R:2",
+    "last_signature": "price|38320005:2.040|38120001:2.068|38180001:2.094|38400006:2.094|38800003:2.095|R:2",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
