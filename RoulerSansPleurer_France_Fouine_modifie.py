@@ -509,7 +509,7 @@ async def notifications_router(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["awaiting_notification_start"] = True
         await q.answer()
         await q.message.reply_text(
-            "🕒 <b>Choisis le début de ta plage silencieuse.</b>\\n"
+            "🕒 <b>Choisis le début de ta plage silencieuse.</b>\n"
             "Envoie une heure au format <code>22:30</code>.",
             parse_mode=ParseMode.HTML,
         )
