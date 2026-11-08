@@ -756,7 +756,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [[InlineKeyboardButton("⛽ Ouvrir le panneau carburants", callback_data="USER_HOME")]]
             + [[InlineKeyboardButton("🔔 Mes notifications", callback_data="NOTIF:OPEN")]]
             + [[InlineKeyboardButton("⛑️ Assistance technique", url=SUPPORT_URL)]]
-            + [[InlineKeyboardButton("💬 Chat communautaire", url="https://t.me/+KgUI89kUYG04MDY0")]]
+            + [[InlineKeyboardButton("💬 Chat communautaire", url="https://t.me/+7-FVUxwvtKs3MGY0")]]
             + ([[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
                if is_staff(chat_id) else [])
         ),
