@@ -433,6 +433,12 @@
     "role": "user",
     "banned": false,
     "update_pin_message_id": 7983,
-    "update_pin_expires_at": 1794236967.8093836
+    "update_pin_expires_at": 1794236967.8093836,
+    "notifications_enabled": true,
+    "quiet_mode": false,
+    "quiet_start": "22:00",
+    "quiet_end": "08:00",
+    "quiet_timezone": "Europe/Paris",
+    "pending_notifications": []
   }
 }
