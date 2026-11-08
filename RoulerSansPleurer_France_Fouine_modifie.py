@@ -750,7 +750,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📍 Comment veux-tu renseigner ta position ?\n"
         "Le partage GPS donne des résultats plus précis que le choix manuel "
         "d'une ville.\n\n"
-        "⛑️ Un souci ou une question ?",
+        "⛑️ Un souci ou une question ?\n⚡️ BY DRISSI",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⛽ Ouvrir le panneau carburants", callback_data="USER_HOME")]]
