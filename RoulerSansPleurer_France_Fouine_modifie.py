@@ -2063,9 +2063,10 @@ async def post_init(application: Application):
             schedule_update_unpin(application, int(cid), int(message_id), float(expires_at))
         except Exception as exc:
             print(f"[BOT] restauration de l'échéance d'épingle impossible ({cid}): {exc}")
-    # Notification de démarrage envoyée en message privé à tous les utilisateurs connus.
-    # Le propriétaire est ajouté aussi, même s'il n'a pas encore de profil enregistré.
-    recipients = {str(cid) for cid in users.keys()}
+    # Notification de démarrage réservée au propriétaire, aux administrateurs
+    # et aux modérateurs. Les utilisateurs classiques ne sont pas destinataires.
+    recipients = {str(cid) for cid in users.keys() if is_staff(cid)}
+    # Le propriétaire est ajouté même s'il n'a pas encore de profil enregistré.
     if CHAT_ID:
         recipients.add(str(CHAT_ID))
     sent = 0
