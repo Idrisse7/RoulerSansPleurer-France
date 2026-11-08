@@ -39,10 +39,12 @@
     "banned": false,
     "notifications_enabled": true,
     "quiet_mode": false,
-    "quiet_start": "22:00",
-    "quiet_end": "08:00",
+    "quiet_start": "20:00",
+    "quiet_end": "07:00",
     "quiet_timezone": "Europe/Paris",
-    "pending_notifications": []
+    "pending_notifications": [],
+    "update_pin_message_id": 7961,
+    "update_pin_expires_at": 1794236961.333805
   },
   "8615737858": {
     "chat_id": 8615737858,
@@ -203,7 +205,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38120002:2.048|R:4",
+    "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38120002:2.048|R:5",
     "sort_mode": "price",
     "mode_fouine": false
   },
@@ -318,7 +320,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38360006:2.048|R:2",
+    "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38360006:2.048|R:3",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
@@ -345,7 +347,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38360006:2.048|R:2",
+    "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38360006:2.048|R:3",
     "sort_mode": "price",
     "mode_fouine": false
   },
@@ -391,7 +393,7 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38320005:2.040|38130002:2.047|38360006:2.048|38120002:2.048|38120001:2.068|R:2",
+    "last_signature": "price|38320005:2.040|38130002:2.047|38360006:2.048|38120002:2.048|38120001:2.068|R:3",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": "2026-11-03 13:10",
