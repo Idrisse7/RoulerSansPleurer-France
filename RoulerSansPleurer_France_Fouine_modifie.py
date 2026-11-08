@@ -554,7 +554,6 @@ async def entry_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "D'accord, on part sur la sélection manuelle.",
-        reply_markup=ReplyKeyboardRemove(),
     )
     await update.message.reply_text(
         "📍 <b>Choisis ta région :</b>",
@@ -603,7 +602,6 @@ async def entry_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📍 Position enregistrée : <b>{html.escape(city_name)}</b>",
         parse_mode=ParseMode.HTML,
-        reply_markup=ReplyKeyboardRemove(),
     )
     await update.message.reply_text(
         "📏 <b>Choisis le rayon de recherche :</b>",
