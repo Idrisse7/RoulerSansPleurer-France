@@ -14,6 +14,8 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -202,6 +204,12 @@ def user_profile(chat_id):
     users[key].setdefault("saved", [])
     users[key].setdefault("role", "user")
     users[key].setdefault("banned", False)
+    users[key].setdefault("notifications_enabled", True)
+    users[key].setdefault("quiet_mode", False)
+    users[key].setdefault("quiet_start", "22:00")
+    users[key].setdefault("quiet_end", "08:00")
+    users[key].setdefault("quiet_timezone", "Europe/Paris")
+    users[key].setdefault("pending_notifications", [])
     users[key].setdefault("username", None)
     users[key].setdefault("first_name", None)
     users[key].setdefault("last_name", None)
@@ -414,6 +422,130 @@ def shortage_block(p, shortages):
     return text + "\n"
 
 
+def _minutes_of_day(value):
+    try:
+        hour, minute = map(int, str(value).split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour * 60 + minute
+    except (TypeError, ValueError):
+        return None
+
+
+def quiet_now(profile, now=None):
+    """Vrai si l'utilisateur est dans sa plage de silence (heure locale)."""
+    if not profile.get("quiet_mode"):
+        return False
+    try:
+        tz = ZoneInfo(profile.get("quiet_timezone") or "Europe/Paris")
+    except Exception:
+        tz = ZoneInfo("Europe/Paris")
+    now = now or datetime.now(tz)
+    current = now.hour * 60 + now.minute
+    start = _minutes_of_day(profile.get("quiet_start", "22:00"))
+    end = _minutes_of_day(profile.get("quiet_end", "08:00"))
+    if start is None or end is None or start == end:
+        return False
+    if start < end:
+        return start <= current < end
+    return current >= start or current < end
+
+
+def notifications_allowed(profile):
+    return bool(profile.get("notifications_enabled", True)) and not quiet_now(profile)
+
+
+def notifications_keyboard(profile):
+    all_on = bool(profile.get("notifications_enabled", True))
+    night_on = bool(profile.get("quiet_mode", False))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            ("🔔 Notifications : activées" if all_on else "🔕 Notifications : désactivées"),
+            callback_data="NOTIF:ALL")],
+        [InlineKeyboardButton(
+            ("🌙 Mode nuit : activé" if night_on else "🌙 Mode nuit : désactivé"),
+            callback_data="NOTIF:NIGHT")],
+        [InlineKeyboardButton("🕒 Modifier les horaires", callback_data="NOTIF:HOURS")],
+        [InlineKeyboardButton("↩️ Horaires par défaut (22h–08h)", callback_data="NOTIF:RESET")],
+        [InlineKeyboardButton("🏠 Retour à l'accueil", callback_data="MENU")],
+    ])
+
+
+def notifications_text(profile):
+    enabled = "activées" if profile.get("notifications_enabled", True) else "désactivées"
+    night = "activé" if profile.get("quiet_mode", False) else "désactivé"
+    return (
+        "🔔 <b>Mes notifications</b>\n\n"
+        f"Notifications générales : <b>{enabled}</b>\n"
+        f"Mode nuit : <b>{night}</b>\n"
+        f"Plage silencieuse : <b>{profile.get('quiet_start', '22:00')} – {profile.get('quiet_end', '08:00')}</b>\n\n"
+        "Pendant le mode nuit, les alertes de prix sont mises en attente puis envoyées à la fin de la plage silencieuse.\n"
+        "Pour modifier les horaires, touche le bouton dédié puis envoie par exemple <code>22:30-07:45</code>."
+    )
+
+
+async def notifications_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat_id = q.message.chat.id
+    profile = user_profile(chat_id)
+    action = q.data.split(":", 1)[1]
+    if action == "OPEN":
+        await q.answer()
+        await q.edit_message_text(
+            notifications_text(profile), parse_mode=ParseMode.HTML,
+            reply_markup=notifications_keyboard(profile),
+        )
+        return
+    if action == "ALL":
+        profile["notifications_enabled"] = not profile.get("notifications_enabled", True)
+        save_users()
+        await q.answer("Préférences enregistrées")
+    elif action == "NIGHT":
+        profile["quiet_mode"] = not profile.get("quiet_mode", False)
+        save_users()
+        await q.answer("Mode nuit activé" if profile["quiet_mode"] else "Mode nuit désactivé")
+    elif action == "HOURS":
+        context.user_data["awaiting_notification_hours"] = True
+        await q.answer()
+        await q.message.reply_text(
+            "🕒 Envoie les horaires au format <code>22:30-07:45</code>.\n"
+            "Les heures sont interprétées selon le fuseau Europe/Paris.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    elif action == "RESET":
+        profile["quiet_start"], profile["quiet_end"] = "22:00", "08:00"
+        save_users()
+        await q.answer("Horaires réinitialisés")
+    await q.edit_message_text(
+        notifications_text(profile), parse_mode=ParseMode.HTML,
+        reply_markup=notifications_keyboard(profile),
+    )
+
+
+async def notification_hours_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_notification_hours"):
+        return
+    raw = (update.message.text or "").strip().replace(" ", "")
+    import re as _re
+    match = _re.fullmatch(r"([0-2]?[0-9]:[0-5][0-9])[-–]([0-2]?[0-9]:[0-5][0-9])", raw)
+    if not match or _minutes_of_day(match.group(1)) is None or _minutes_of_day(match.group(2)) is None or _minutes_of_day(match.group(1)) == _minutes_of_day(match.group(2)):
+        await update.message.reply_text("❌ Format invalide. Exemple : <code>22:30-07:45</code>.", parse_mode=ParseMode.HTML)
+        return
+    start, end = match.group(1), match.group(2)
+    start = ":".join(part.zfill(2) for part in start.split(":"))
+    end = ":".join(part.zfill(2) for part in end.split(":"))
+    profile = user_profile(update.effective_chat.id)
+    profile["quiet_start"], profile["quiet_end"] = start, end
+    profile["quiet_mode"] = True
+    save_users()
+    context.user_data.pop("awaiting_notification_hours", None)
+    await update.message.reply_text(
+        notifications_text(profile), parse_mode=ParseMode.HTML,
+        reply_markup=notifications_keyboard(profile),
+    )
+
+
 def main_keyboard(chat_id=None):
     admin_row = (
         [[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
@@ -434,6 +566,7 @@ def main_keyboard(chat_id=None):
         ],
         [InlineKeyboardButton("📂 Mes recherches", callback_data="MY_SEARCHES")],
         [InlineKeyboardButton("🦡 Mode Fouine", callback_data="FOUINE")],
+        [InlineKeyboardButton("🔔 Mes notifications", callback_data="NOTIF:OPEN")],
     ] + admin_row)
 
 
@@ -533,6 +666,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("⛽ Ouvrir le panneau carburants", callback_data="USER_HOME")]]
+            + [[InlineKeyboardButton("🔔 Mes notifications", callback_data="NOTIF:OPEN")]]
             + [[InlineKeyboardButton("⛑️ Assistance technique", url=SUPPORT_URL)]]
             + ([[InlineKeyboardButton("⚙️ Administration", callback_data="ADM:HOME")]]
                if is_staff(chat_id) else [])
@@ -1575,7 +1709,10 @@ async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Réceptionne le texte d'une annonce (propriétaire uniquement)."""
+    """Réceptionne les horaires de notification ou le texte d'une annonce."""
+    if context.user_data.get("awaiting_notification_hours"):
+        await notification_hours_text(update, context)
+        return
     if context.user_data.get("adm_awaiting") != "announce":
         return
     if not is_admin(update.effective_chat.id):
@@ -1722,6 +1859,20 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
         if profile.get("banned"):
             continue
 
+        # Envoie les alertes accumulées dès la fin du mode nuit.
+        pending = profile.get("pending_notifications", [])
+        if pending and notifications_allowed(profile):
+            try:
+                digest = "🌅 <b>Récapitulatif de tes alertes pendant le mode nuit</b>\n\n" + "\n\n".join(pending[-20:])
+                await context.bot.send_message(
+                    chat_id=int(chat_id), text=digest,
+                    parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                )
+                profile["pending_notifications"] = []
+                save_users()
+            except Exception as exc:
+                print(f"[NOTIF] envoi du récapitulatif impossible ({chat_id}) : {exc}")
+
         searches = []
         seen = set()
         if profile.get("lat") is not None and profile.get("city") and profile.get("fuel"):
@@ -1754,18 +1905,26 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if fouine or signature != p.get("last_signature"):
                     p["last_signature"] = signature
-                    await context.bot.send_message(
-                        chat_id=int(chat_id),
-                        text=(
-                            "🦡 <b>Mode Fouine — relevé des prix</b>\n\n"
-                            if fouine
-                            else
-                            "🔔 <b>Mise à jour des prix</b>\n\n"
-                        ) +
-                        format_prices(p, stations, sort_by=sort_mode, shortages=shortages),
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
+                    alert_text = (
+                        "🦡 <b>Mode Fouine — relevé des prix</b>\n\n"
+                        if fouine
+                        else
+                        "🔔 <b>Mise à jour des prix</b>\n\n"
+                    ) + format_prices(p, stations, sort_by=sort_mode, shortages=shortages)
+                    if not profile.get("notifications_enabled", True):
+                        # Désactivation générale : ne pas envoyer ni mettre en attente.
+                        pass
+                    elif quiet_now(profile):
+                        # Mode nuit : conserve les alertes pour le récapitulatif du matin.
+                        queue = profile.setdefault("pending_notifications", [])
+                        queue.append(alert_text)
+                        profile["pending_notifications"] = queue[-20:]
+                    else:
+                        await context.bot.send_message(
+                            chat_id=int(chat_id), text=alert_text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
                     save_users()
             except Exception:
                 continue
@@ -1784,15 +1943,24 @@ async def post_init(application: Application):
             schedule_update_unpin(application, int(cid), int(message_id), float(expires_at))
         except Exception as exc:
             print(f"[BOT] restauration de l'échéance d'épingle impossible ({cid}): {exc}")
-    # Notification de démarrage envoyée au CHAT_ID (secret GitHub), si défini.
+    # Notification de démarrage envoyée en message privé à tous les utilisateurs connus.
+    # Le propriétaire est ajouté aussi, même s'il n'a pas encore de profil enregistré.
+    recipients = {str(cid) for cid in users.keys()}
     if CHAT_ID:
+        recipients.add(str(CHAT_ID))
+    sent = 0
+    failed = 0
+    for recipient in recipients:
         try:
             await application.bot.send_message(
-                chat_id=int(CHAT_ID),
+                chat_id=int(recipient),
                 text="🟢 RoulerSansPleurer démarré.",
             )
+            sent += 1
         except Exception as exc:
-            print("[BOT] notification de démarrage impossible :", exc)
+            failed += 1
+            print(f"[BOT] notification de démarrage impossible ({recipient}) : {exc}")
+    print(f"[BOT] notification de démarrage : {sent} envoyée(s), {failed} échec(s).")
 
 
 def menu_handlers():
@@ -1804,6 +1972,7 @@ def menu_handlers():
         CallbackQueryHandler(set_location, pattern=r"^SET_LOCATION$"),
         CallbackQueryHandler(set_fuel, pattern=r"^SET_FUEL$"),
         CallbackQueryHandler(toggle_fouine, pattern=r"^FOUINE$"),
+        CallbackQueryHandler(notifications_router, pattern=r"^NOTIF:"),
         CallbackQueryHandler(save_search, pattern=r"^SAVE_SEARCH$"),
         CallbackQueryHandler(my_searches, pattern=r"^MY_SEARCHES$"),
         CallbackQueryHandler(select_search, pattern=r"^SS:\d+$"),
