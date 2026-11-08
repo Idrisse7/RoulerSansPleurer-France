@@ -1543,6 +1543,8 @@ def list_view(actor_id, page):
         icon = "⛔️" if p.get("banned") else ROLE_ICON[role_of(cid)]
         rows.append([InlineKeyboardButton(
             f"{icon} {user_label(p)}"[:45], callback_data=f"ADM:U:{cid}")])
+    # Recherche directe d'un utilisateur par son Chat ID.
+    rows.append([InlineKeyboardButton("🔎 Rechercher par Chat ID", callback_data="ADM:SEARCH")])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"ADM:LIST:{page-1}"))
@@ -1645,6 +1647,26 @@ async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if act == "LIST":
         await q.answer()
         text, markup = list_view(actor, int(arg or 0))
+        await _show(q, text, markup)
+        return
+
+    if act == "SEARCH":
+        await q.answer()
+        context.user_data["adm_awaiting"] = "user_chat_id"
+        await _show(
+            q,
+            "🔎 <b>Rechercher un utilisateur</b>\n\n"
+            "Envoie le Chat ID numérique de la personne à retrouver.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuler", callback_data="ADM:SEARCHCANCEL")]
+            ]),
+        )
+        return
+
+    if act == "SEARCHCANCEL":
+        context.user_data.pop("adm_awaiting", None)
+        await q.answer("Recherche annulée.")
+        text, markup = list_view(actor, 0)
         await _show(q, text, markup)
         return
 
@@ -1826,7 +1848,36 @@ async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Réceptionne les horaires de notification ou le texte d'une annonce."""
+    """Réceptionne la recherche utilisateur, les horaires ou le texte d'une annonce."""
+    if context.user_data.get("adm_awaiting") == "user_chat_id":
+        actor = update.effective_chat.id
+        if not is_staff(actor):
+            context.user_data.pop("adm_awaiting", None)
+            return
+        raw_id = (update.message.text or "").strip()
+        if not raw_id.isdigit():
+            await update.message.reply_text(
+                "❌ Chat ID invalide. Envoie uniquement les chiffres, ou utilise Annuler."
+            )
+            return
+        target_id = str(int(raw_id))
+        if target_id not in users:
+            await update.message.reply_text(
+                f"❌ Aucun utilisateur trouvé avec le Chat ID <code>{html.escape(target_id)}</code>.\n"
+                "Tu peux réessayer ou annuler.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Annuler", callback_data="ADM:SEARCHCANCEL")]
+                ]),
+            )
+            return
+        context.user_data.pop("adm_awaiting", None)
+        text, markup = detail_view(actor, target_id)
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=markup
+        )
+        return
+
     if (
         context.user_data.get("awaiting_notification_start")
         or context.user_data.get("awaiting_notification_end")
