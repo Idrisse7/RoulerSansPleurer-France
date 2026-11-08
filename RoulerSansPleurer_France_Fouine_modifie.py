@@ -505,11 +505,12 @@ async def notifications_router(update: Update, context: ContextTypes.DEFAULT_TYP
         save_users()
         await q.answer("Mode nuit activé" if profile["quiet_mode"] else "Mode nuit désactivé")
     elif action == "HOURS":
-        context.user_data["awaiting_notification_hours"] = True
+        context.user_data.pop("awaiting_notification_end", None)
+        context.user_data["awaiting_notification_start"] = True
         await q.answer()
         await q.message.reply_text(
-            "🕒 Envoie les horaires au format <code>22:30-07:45</code>.\n"
-            "Les heures sont interprétées selon le fuseau Europe/Paris.",
+            "🕒 <b>Choisis le début de ta plage silencieuse.</b>\\n"
+            "Envoie une heure au format <code>22:30</code>.",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -524,24 +525,53 @@ async def notifications_router(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def notification_hours_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_notification_hours"):
+    raw = (update.message.text or "").strip()
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", raw)
+    if not match:
+        await update.message.reply_text(
+            "❌ Heure invalide. Utilise le format <code>HH:MM</code>, par exemple <code>22:30</code>.",
+            parse_mode=ParseMode.HTML,
+        )
         return
-    raw = (update.message.text or "").strip().replace(" ", "")
-    import re as _re
-    match = _re.fullmatch(r"([0-2]?[0-9]:[0-5][0-9])[-–]([0-2]?[0-9]:[0-5][0-9])", raw)
-    if not match or _minutes_of_day(match.group(1)) is None or _minutes_of_day(match.group(2)) is None or _minutes_of_day(match.group(1)) == _minutes_of_day(match.group(2)):
-        await update.message.reply_text("❌ Format invalide. Exemple : <code>22:30-07:45</code>.", parse_mode=ParseMode.HTML)
+
+    value = f"{int(match.group(1)):02d}:{match.group(2)}"
+
+    if context.user_data.get("awaiting_notification_start"):
+        context.user_data["notification_start_draft"] = value
+        context.user_data.pop("awaiting_notification_start", None)
+        context.user_data["awaiting_notification_end"] = True
+        await update.message.reply_text(
+            f"✅ Début enregistré : <b>{value}</b>.\n"
+            "Maintenant, choisis la fin de ta plage silencieuse au format <code>HH:MM</code>.",
+            parse_mode=ParseMode.HTML,
+        )
         return
-    start, end = match.group(1), match.group(2)
-    start = ":".join(part.zfill(2) for part in start.split(":"))
-    end = ":".join(part.zfill(2) for part in end.split(":"))
+
+    if not context.user_data.get("awaiting_notification_end"):
+        return
+
+    start = context.user_data.get("notification_start_draft")
+    end = value
+    if not start:
+        context.user_data.pop("awaiting_notification_end", None)
+        await update.message.reply_text("La configuration a expiré. Relance « Modifier les horaires ».")
+        return
+    if start == end:
+        await update.message.reply_text(
+            "❌ Le début et la fin ne peuvent pas être identiques. Choisis une autre heure de fin (format <code>HH:MM</code>).",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     profile = user_profile(update.effective_chat.id)
     profile["quiet_start"], profile["quiet_end"] = start, end
     profile["quiet_mode"] = True
     save_users()
-    context.user_data.pop("awaiting_notification_hours", None)
+    context.user_data.pop("awaiting_notification_end", None)
+    context.user_data.pop("notification_start_draft", None)
     await update.message.reply_text(
-        notifications_text(profile), parse_mode=ParseMode.HTML,
+        "✅ <b>Ta plage silencieuse est enregistrée.</b>\n\n" + notifications_text(profile),
+        parse_mode=ParseMode.HTML,
         reply_markup=notifications_keyboard(profile),
     )
 
@@ -1710,7 +1740,10 @@ async def adm_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Réceptionne les horaires de notification ou le texte d'une annonce."""
-    if context.user_data.get("awaiting_notification_hours"):
+    if (
+        context.user_data.get("awaiting_notification_start")
+        or context.user_data.get("awaiting_notification_end")
+    ):
         await notification_hours_text(update, context)
         return
     if context.user_data.get("adm_awaiting") != "announce":
