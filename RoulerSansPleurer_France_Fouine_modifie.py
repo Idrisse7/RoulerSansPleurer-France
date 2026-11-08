@@ -8,6 +8,7 @@ AUTO_CHECK_FOOTER = """🔄 <b>Vérification automatique toutes les 10 minutes.<
 import asyncio
 import html
 import json
+import logging
 import math
 import os
 import re
@@ -17,7 +18,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 import aiohttp
 from telegram import (
@@ -51,6 +52,11 @@ DATA_URL = (
     "datasets/prix-des-carburants-en-france-flux-instantane-v2/records"
 )
 GEO_URL = "https://geo.api.gouv.fr"
+
+# Les URL de l'API Telegram contiennent le token du bot : on empêche les bibliothèques HTTP
+# de les écrire dans les logs (visibles dans GitHub Actions).
+for _noisy in ("httpx", "httpcore", "aiohttp"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 # Lien public (pas un secret) vers le profil d'assistance technique.
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/Idravisse777")
 
@@ -92,6 +98,47 @@ CITY_PAGE_SIZE = 8
 
 CHOOSE_ENTRY, CHOOSE_REGION, CHOOSE_DEPARTMENT, ENTER_CITY, CHOOSE_RADIUS, CHOOSE_FUEL, MAIN_MENU = range(7)
 
+# ───────────────── Durcissement sécurité ─────────────────
+MAX_CITY_LEN = 60
+ALLOWED_RADII = {1, *RADII_KM}
+_GEO_CODE_RE = re.compile(r"[0-9A-Za-z]{2,5}")
+
+
+def valid_fuel(value):
+    """Seuls les carburants proposés par les boutons sont acceptés."""
+    return isinstance(value, str) and value in FUEL_FIELD
+
+
+def valid_geo_code(value):
+    """Codes région / département / commune : lettres et chiffres uniquement."""
+    return bool(_GEO_CODE_RE.fullmatch(str(value or "")))
+
+
+def geo_where(p):
+    """Clause géographique de l'API prix, construite uniquement à partir de nombres."""
+    lon, lat, radius = float(p["lon"]), float(p["lat"]), int(p["radius"])
+    if not (math.isfinite(lon) and math.isfinite(lat)):
+        raise ValueError("coordonnées invalides")
+    return f"within_distance(geom, geom'POINT({lon} {lat})', {radius} km)"
+
+
+# Anti-flood : 20 requêtes / 10 s / chat (le propriétaire est exempté).
+FLOOD_MAX, FLOOD_WINDOW = 20, 10.0
+_FLOOD = {}
+
+
+def flooded(chat_id):
+    now = time.time()
+    start, count = _FLOOD.get(chat_id, (now, 0))
+    if now - start > FLOOD_WINDOW:
+        start, count = now, 0
+    count += 1
+    _FLOOD[chat_id] = (start, count)
+    if len(_FLOOD) > 5000:
+        for k in [k for k, (t, _) in _FLOOD.items() if now - t > FLOOD_WINDOW]:
+            _FLOOD.pop(k, None)
+    return count > FLOOD_MAX
+
 
 def entry_mode_keyboard():
     """Clavier normal (non-inline) : seul ce type de clavier peut
@@ -125,24 +172,24 @@ def git_commit_and_push():
     try:
         subprocess.run(
             ["git", "config", "user.email", "bot@users.noreply.github.com"],
-            check=False, capture_output=True,
+            check=False, capture_output=True, timeout=60,
         )
         subprocess.run(
             ["git", "config", "user.name", "RoulerSansPleurer Bot"],
-            check=False, capture_output=True,
+            check=False, capture_output=True, timeout=60,
         )
         subprocess.run(
             ["git", "add", str(USERS_FILE)],
-            check=False, capture_output=True,
+            check=False, capture_output=True, timeout=60,
         )
         commit = subprocess.run(
             ["git", "commit", "-m", "Mise a jour automatique des utilisateurs"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=60,
         )
         if commit.returncode == 0:
             push = subprocess.run(
                 ["git", "push"],
-                capture_output=True, text=True,
+                capture_output=True, text=True, timeout=60,
             )
             if push.returncode == 0:
                 _last_git_push = now
@@ -154,18 +201,32 @@ def git_commit_and_push():
 
 def load_users():
     global users
-    if USERS_FILE.exists():
+    if not USERS_FILE.exists():
+        return
+    text = USERS_FILE.read_text(encoding="utf-8").strip()
+
+    try:
+        data = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            raise ValueError("format inattendu")
+        users = data
+    except Exception as exc:
+        # Fichier corrompu : on le met de côté au lieu de l'écraser silencieusement au prochain enregistrement.
+        backup = USERS_FILE.with_name(f"{USERS_FILE.name}.corrompu-{int(time.time())}")
         try:
-            users = json.loads(USERS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            users = {}
+            USERS_FILE.replace(backup)
+        except OSError:
+            pass
+        print(f"[DATA] fichier utilisateurs illisible ({exc}) -> mis de côté : {backup}")
+        users = {}
 
 
 def save_users():
-    USERS_FILE.write_text(
-        json.dumps(users, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    raw = json.dumps(users, ensure_ascii=False, indent=2)
+    # Écriture atomique : un arrêt en plein enregistrement ne peut plus laisser un fichier tronqué.
+    tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
+    tmp.write_text(raw, encoding="utf-8")
+    os.replace(tmp, USERS_FILE)
     git_commit_and_push()
 
 
@@ -248,7 +309,7 @@ async def get_departments(region_code):
     async with aiohttp.ClientSession() as session:
         return await get_json(
             session,
-            f"{GEO_URL}/regions/{region_code}/departements",
+            f"{GEO_URL}/regions/{quote(str(region_code), safe='')}/departements",
             {"fields": "nom,code"},
         )
 
@@ -274,7 +335,7 @@ async def get_all_cities(department_code):
     async with aiohttp.ClientSession() as session:
         return await get_json(
             session,
-            f"{GEO_URL}/departements/{department_code}/communes",
+            f"{GEO_URL}/departements/{quote(str(department_code), safe='')}/communes",
             {
                 "fields": "nom,code,centre,codesPostaux",
                 "limit": 1000,
@@ -370,10 +431,7 @@ async def shortages_for_user(p, show=3):
     """Stations en rupture du carburant choisi dans le rayon. None si indisponible."""
     try:
         label = FUEL_API_NAME[p["fuel"]]
-        where = (
-            f"within_distance(geom, geom'POINT({p['lon']} {p['lat']})', {p['radius']} km) "
-            f'and carburants_indisponibles like "{label}"'
-        )
+        where = geo_where(p) + f' and carburants_indisponibles like "{label}"'
         async with aiohttp.ClientSession() as session:
             data = await get_json(session, DATA_URL, {"where": where, "limit": 50})
         stations = []
@@ -790,7 +848,11 @@ async def choose_region(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    _, code, name = q.data.split(":", 2)
+    parts = q.data.split(":", 2)
+    if len(parts) != 3 or not valid_geo_code(parts[1]):
+        return CHOOSE_REGION
+    _, code, name = parts
+    name = name[:60]
     p = user_profile(q.message.chat.id)
     p["region"] = name
     p["region_code"] = code
@@ -823,7 +885,11 @@ async def choose_department(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    _, code, name = q.data.split(":", 2)
+    parts = q.data.split(":", 2)
+    if len(parts) != 3 or not valid_geo_code(parts[1]):
+        return CHOOSE_DEPARTMENT
+    _, code, name = parts
+    name = name[:60]
     p = user_profile(q.message.chat.id)
     p["department"] = name
     p["department_code"] = code
@@ -895,6 +961,9 @@ async def enter_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city_name = update.message.text.strip()
     if len(city_name) < 2:
         await update.message.reply_text("❌ Nom de ville trop court. Réessaie.")
+        return ENTER_CITY
+    if len(city_name) > MAX_CITY_LEN:
+        await update.message.reply_text("❌ Nom de ville trop long. Réessaie.")
         return ENTER_CITY
 
     p = user_profile(update.effective_chat.id)
@@ -976,6 +1045,8 @@ async def choose_radius(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     radius = int(q.data.split(":")[1])
+    if radius not in ALLOWED_RADII:
+        return CHOOSE_RADIUS
 
     p = user_profile(q.message.chat.id)
     p["radius"] = radius
@@ -994,6 +1065,8 @@ async def choose_fuel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     fuel = q.data.split(":", 1)[1]
+    if not valid_fuel(fuel):
+        return CHOOSE_FUEL
 
     p = user_profile(q.message.chat.id)
     p["fuel"] = fuel
@@ -1039,11 +1112,7 @@ async def prices_for_user(p, sort_by="price"):
     # IMPORTANT : l'API utilise geom en vraies coordonnées GPS
     # (longitude, latitude), tandis que les champs latitude/longitude
     # historiques sont stockés sous forme entière (ex. 4818300).
-    where = (
-        f"within_distance(geom, "
-        f"geom'POINT({p['lon']} {p['lat']})', "
-        f"{p['radius']} km)"
-    )
+    where = geo_where(p)
 
     params = {
         "where": where,
@@ -1375,8 +1444,25 @@ def can_set_role(actor_id, target_id, new_role):
 async def block_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bloque toute interaction d'un utilisateur exclu (jamais le propriétaire)."""
     chat = update.effective_chat
-    if not chat or is_admin(chat.id):
+    if not chat:
         return
+    # Le bot ne fonctionne qu'en conversation privée.
+    if chat.type != "private":
+        try:
+            if update.callback_query:
+                await update.callback_query.answer("Utilise ce bot en conversation privée.", show_alert=True)
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
+    if is_admin(chat.id):
+        return
+    if flooded(chat.id):
+        try:
+            if update.callback_query:
+                await update.callback_query.answer()
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
     p = users.get(str(chat.id))
     if p and p.get("banned"):
         try:
@@ -1959,7 +2045,8 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
                             disable_web_page_preview=True,
                         )
                     save_users()
-            except Exception:
+            except Exception as exc:
+                print(f"[CRON] recherche ignorée ({chat_id}) : {exc!r}")
                 continue
 
 
@@ -1993,6 +2080,7 @@ async def post_init(application: Application):
         except Exception as exc:
             failed += 1
             print(f"[BOT] notification de démarrage impossible ({recipient}) : {exc}")
+        await asyncio.sleep(0.05)  # reste sous la limite d'envoi de Telegram
     print(f"[BOT] notification de démarrage : {sent} envoyée(s), {failed} échec(s).")
 
 
