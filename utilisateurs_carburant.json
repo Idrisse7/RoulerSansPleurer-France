@@ -36,7 +36,13 @@
       }
     ],
     "role": "user",
-    "banned": false
+    "banned": false,
+    "notifications_enabled": true,
+    "quiet_mode": false,
+    "quiet_start": "22:00",
+    "quiet_end": "08:00",
+    "quiet_timezone": "Europe/Paris",
+    "pending_notifications": []
   },
   "8615737858": {
     "chat_id": 8615737858,
