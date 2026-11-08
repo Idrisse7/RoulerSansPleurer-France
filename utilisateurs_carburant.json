@@ -32,7 +32,7 @@
         "department": "Isère",
         "region": "Auvergne-Rhône-Alpes",
         "id": "1",
-        "last_signature": "price|38320005:2.040|38130002:2.047|38360006:2.048|38120002:2.048|38120001:2.068|R:3"
+        "last_signature": "price|38320005:2.040|38130002:2.047|38360006:2.048|38120002:2.048|38120001:2.068|R:2"
       }
     ],
     "role": "user",
@@ -67,7 +67,9 @@
     "sort_by": "price",
     "last_signature": "price|75015036:0.825|60000001:0.907|78370002:0.946|60000012:0.954|28100006:0.964|R:898",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7963,
+    "update_pin_expires_at": 1794236962.729405
   },
   "6560194691": {
     "chat_id": 6560194691,
@@ -90,7 +92,9 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7965,
+    "update_pin_expires_at": 1794236963.1178048
   },
   "945467587": {
     "chat_id": 945467587,
@@ -136,7 +140,9 @@
     "sort_by": "price",
     "last_signature": "price|42100018:2.051|42100022:2.052|42000015:2.056|42150001:2.071|42390001:2.076|R:2",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7967,
+    "update_pin_expires_at": 1794236963.6910338
   },
   "1654216330": {
     "chat_id": 1654216330,
@@ -207,7 +213,9 @@
     "sort_by": "price",
     "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38120002:2.048|R:5",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7969,
+    "update_pin_expires_at": 1794236964.4793372
   },
   "5336428591": {
     "chat_id": 5336428591,
@@ -230,7 +238,9 @@
     "sort_by": "price",
     "last_signature": "price|38120001:1.926|38400006:1.964|38240003:1.966|38180001:1.970|38130002:1.970|R:7",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7971,
+    "update_pin_expires_at": 1794236964.9045293
   },
   "7272524344": {
     "chat_id": 7272524344,
@@ -253,7 +263,9 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7973,
+    "update_pin_expires_at": 1794236965.3095145
   },
   "7154715857": {
     "chat_id": 7154715857,
@@ -299,7 +311,9 @@
     "sort_by": "price",
     "last_signature": "price|38470004:0.865|38590001:0.865|38360001:0.868|38180001:0.869|38400006:0.869|R:65",
     "sort_mode": "price",
-    "mode_fouine": true
+    "mode_fouine": true,
+    "update_pin_message_id": 7975,
+    "update_pin_expires_at": 1794236965.8987513
   },
   "8217106809": {
     "chat_id": 8217106809,
@@ -326,7 +340,9 @@
     "joined_at": null,
     "saved": [],
     "role": "user",
-    "banned": false
+    "banned": false,
+    "update_pin_message_id": 7977,
+    "update_pin_expires_at": 1794236966.3281507
   },
   "1301550393": {
     "chat_id": 1301550393,
@@ -349,7 +365,9 @@
     "sort_by": "price",
     "last_signature": "price|38340012:2.039|38340013:2.039|38320005:2.040|38130002:2.047|38360006:2.048|R:3",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7979,
+    "update_pin_expires_at": 1794236966.9348762
   },
   "8538132486": {
     "chat_id": 8538132486,
@@ -372,7 +390,9 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 7981,
+    "update_pin_expires_at": 1794236967.431944
   },
   "8390843997": {
     "chat_id": 8390843997,
@@ -411,6 +431,8 @@
       }
     ],
     "role": "user",
-    "banned": false
+    "banned": false,
+    "update_pin_message_id": 7983,
+    "update_pin_expires_at": 1794236967.8093836
   }
 }
