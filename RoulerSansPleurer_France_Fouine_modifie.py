@@ -7,7 +7,6 @@ AUTO_CHECK_FOOTER = """🔄 <b>Vérification automatique toutes les 10 minutes.<
 # RoulerSansPleurer_France_Fouine_modifie.py
 import asyncio
 import html
-import hmac
 import json
 import math
 import os
@@ -45,7 +44,6 @@ from telegram.ext import (
 # Aucun secret en clair : tout vient des secrets GitHub (variables d'environnement).
 TOKEN = os.getenv("ROULER_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
-SETUP_SECRET = os.getenv("SETUP_SECRET", "").strip()
 if not TOKEN:
     raise SystemExit("❌ Secret ROULER_TOKEN manquant (GitHub > Settings > Secrets and variables > Actions).")
 DATA_URL = (
@@ -60,8 +58,6 @@ TOP_N = 5
 RADII_KM = [5, 10, 20, 40, 100]
 REFRESH_SECONDS = 600
 USERS_FILE = Path("utilisateurs_carburant.json")
-OWNER_FILE = Path("owner_state.json")
-OWNER_ID = CHAT_ID  # CHAT_ID reste prioritaire et verrouille le propriétaire.
 
 FUEL_LABELS = {
     "Gazole": "Gazole",
@@ -121,10 +117,10 @@ GIT_PUSH_MIN_INTERVAL = 60  # secondes
 _last_git_push = 0.0
 
 
-def git_commit_and_push(force=False, extra_paths=None):
+def git_commit_and_push():
     global _last_git_push
     now = time.time()
-    if not force and now - _last_git_push < GIT_PUSH_MIN_INTERVAL:
+    if now - _last_git_push < GIT_PUSH_MIN_INTERVAL:
         return
     try:
         subprocess.run(
@@ -136,7 +132,7 @@ def git_commit_and_push(force=False, extra_paths=None):
             check=False, capture_output=True,
         )
         subprocess.run(
-            ["git", "add", str(USERS_FILE)] + [str(x) for x in (extra_paths or [])],
+            ["git", "add", str(USERS_FILE)],
             check=False, capture_output=True,
         )
         commit = subprocess.run(
@@ -150,14 +146,10 @@ def git_commit_and_push(force=False, extra_paths=None):
             )
             if push.returncode == 0:
                 _last_git_push = now
-                return True
-            print("[GIT] push echoue :", push.stderr.strip())
-            return False
-        print("[GIT] aucun commit créé :", commit.stderr.strip())
-        return False
+            else:
+                print("[GIT] push echoue :", push.stderr.strip())
     except Exception as exc:
         print("[GIT] erreur :", exc)
-        return False
 
 
 def load_users():
@@ -169,91 +161,12 @@ def load_users():
             users = {}
 
 
-def load_owner():
-    """Charge le propriétaire initialisé une seule fois, sauf CHAT_ID prioritaire."""
-    global OWNER_ID
-    if CHAT_ID:
-        OWNER_ID = CHAT_ID
-        return
-    if OWNER_FILE.exists():
-        try:
-            state = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
-            if state.get("setup_completed") is True and str(state.get("owner_id", "")).strip():
-                OWNER_ID = str(state["owner_id"]).strip()
-        except Exception as exc:
-            print("[SECURITY] état propriétaire illisible : ", exc)
-            OWNER_ID = ""
-
-
 def save_users():
     USERS_FILE.write_text(
         json.dumps(users, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     git_commit_and_push()
-
-
-async def setup_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initialisation unique du propriétaire via /setup <SETUP_SECRET>."""
-    global OWNER_ID
-    message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
-        return
-
-    # Ne jamais autoriser le remplacement d'un propriétaire déjà défini.
-    if CHAT_ID or OWNER_ID or OWNER_FILE.exists():
-        await message.reply_text("🔒 Configuration déjà verrouillée. Cette commande est désactivée.")
-        return
-
-    supplied = context.args[0].strip() if context.args else ""
-    if not SETUP_SECRET:
-        await message.reply_text("⛔ Initialisation désactivée : le secret SETUP_SECRET n'est pas configuré côté serveur.")
-        return
-
-    # Supprime au plus vite le message qui contient le secret.
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    if not supplied or not hmac.compare_digest(supplied, SETUP_SECRET):
-        await context.bot.send_message(chat_id=chat.id, text="⛔ Secret invalide. Aucun changement effectué.")
-        return
-
-    new_owner = str(chat.id)
-    state = {"owner_id": new_owner, "setup_completed": True}
-    try:
-        # Création exclusive : un fichier existant, même invalide, bloque toute reprise.
-        with OWNER_FILE.open("x", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        OWNER_ID = new_owner
-        # Force une tentative de persistance GitHub pour les exécutions éphémères.
-        pushed = git_commit_and_push(force=True, extra_paths=[OWNER_FILE])
-        if not pushed:
-            OWNER_ID = ""
-            OWNER_FILE.unlink(missing_ok=True)
-            await context.bot.send_message(
-                chat_id=chat.id,
-                text="⛔ Impossible de sauvegarder le verrouillage dans GitHub. Réessaie après vérification des droits GitHub Actions.",
-            )
-            return
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text="✅ Propriétaire initialisé. La configuration est maintenant verrouillée : /setup ne pourra plus être réutilisé.",
-        )
-    except FileExistsError:
-        await context.bot.send_message(chat_id=chat.id, text="🔒 Configuration déjà initialisée. Aucun changement effectué.")
-    except Exception as exc:
-        OWNER_ID = ""
-        try:
-            OWNER_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
-        print("[SECURITY] échec initialisation propriétaire :", type(exc).__name__)
-        await context.bot.send_message(chat_id=chat.id, text="⛔ Échec de l'initialisation. Aucun propriétaire n'a été enregistré.")
 
 
 def user_profile(chat_id):
@@ -422,8 +335,8 @@ def fuel_keyboard():
 
 
 def is_admin(chat_id):
-    """Seul le propriétaire fixé par CHAT_ID ou l'initialisation unique est owner."""
-    return bool(OWNER_ID) and str(chat_id) == str(OWNER_ID)
+    """Seul le chat défini dans le secret CHAT_ID est administrateur."""
+    return bool(CHAT_ID) and str(chat_id) == CHAT_ID
 
 
 def _as_set(value):
@@ -755,10 +668,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_users()
 
     # Notification au propriétaire quand quelqu'un rejoint le bot.
-    if is_new and OWNER_ID and not is_admin(chat_id):
+    if is_new and CHAT_ID and not is_admin(chat_id):
         try:
             await context.bot.send_message(
-                chat_id=int(OWNER_ID),
+                chat_id=int(CHAT_ID),
                 text=(
                     "🆕 <b>Nouvel utilisateur</b>\n\n"
                     f"👤 {html.escape(user_label(p))}\n"
@@ -1386,8 +1299,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ───────────────────────── Administration ─────────────────────────
-# Hiérarchie : owner (CHAT_ID ou initialisation SETUP_SECRET unique) > admin > moderator > user.
-# Le rôle owner n'est jamais attribué depuis le profil JSON. Un rôle ne peut jamais agir sur un rôle égal ou supérieur.
+# Hiérarchie : owner (secret CHAT_ID, intouchable) > admin > moderator > user.
+# Le rôle "owner" ne vient QUE du secret CHAT_ID : aucune valeur du fichier JSON
+# ne peut le donner. Un rôle ne peut jamais agir sur un rôle égal ou supérieur.
 ROLE_RANK = {"user": 0, "moderator": 1, "admin": 2, "owner": 3}
 ROLE_NAME = {
     "owner": "Propriétaire",
@@ -1425,7 +1339,7 @@ def user_label(p):
 
 
 def _is_owner_id(target_id):
-    return bool(OWNER_ID) and str(target_id) == str(OWNER_ID)
+    return bool(CHAT_ID) and str(target_id) == CHAT_ID
 
 
 def can_ban(actor_id, target_id):
@@ -2051,7 +1965,6 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     load_users()
-    load_owner()
     # Restaure les retraits d'épingles après un redémarrage du bot.
     now = time.time()
     for cid, profile in list(users.items()):
@@ -2066,8 +1979,8 @@ async def post_init(application: Application):
     # Notification de démarrage envoyée en message privé à tous les utilisateurs connus.
     # Le propriétaire est ajouté aussi, même s'il n'a pas encore de profil enregistré.
     recipients = {str(cid) for cid in users.keys()}
-    if OWNER_ID:
-        recipients.add(str(OWNER_ID))
+    if CHAT_ID:
+        recipients.add(str(CHAT_ID))
     sent = 0
     failed = 0
     for recipient in recipients:
@@ -2154,8 +2067,6 @@ def build_application():
         allow_reentry=True,
     )
 
-    # Initialisation propriétaire : commande disponible uniquement avant verrouillage.
-    app.add_handler(CommandHandler("setup", setup_owner))
     # Garde-fou : bloque les utilisateurs exclus avant tout autre traitement.
     app.add_handler(TypeHandler(Update, block_banned), group=-1)
     # Administration : indépendante de l'état de la conversation principale.
