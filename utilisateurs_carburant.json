@@ -18,7 +18,7 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38320005:2.045|38120002:2.048|38170004:2.053|38180001:2.064|38600003:2.070|R:3",
+    "last_signature": "price|38320005:2.045|38120002:2.048|38170004:2.053|38180001:2.064|38600003:2.070|R:2",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
@@ -65,9 +65,7 @@
     "sort_by": "price",
     "last_signature": "price|75015036:0.825|60000001:0.907|78370002:0.946|60000012:0.954|28100006:0.964|R:875",
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8128,
-    "update_pin_expires_at": 1794248686.1153526
+    "mode_fouine": false
   },
   "6560194691": {
     "chat_id": 6560194691,
@@ -90,9 +88,7 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8130,
-    "update_pin_expires_at": 1794248686.7088602
+    "mode_fouine": false
   },
   "945467587": {
     "chat_id": 945467587,
@@ -138,9 +134,7 @@
     "sort_by": "price",
     "last_signature": "price|42000014:2.051|42100018:2.051|42100022:2.052|42150001:2.073|42390001:2.076|R:2",
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8132,
-    "update_pin_expires_at": 1794248687.4743986
+    "mode_fouine": false
   },
   "1654216330": {
     "chat_id": 1654216330,
@@ -211,9 +205,7 @@
     "sort_by": "price",
     "last_signature": "price|38340012:2.039|38320005:2.045|38120002:2.048|38170004:2.053|38430004:2.059|R:6",
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8134,
-    "update_pin_expires_at": 1794248688.4952648
+    "mode_fouine": false
   },
   "5336428591": {
     "chat_id": 5336428591,
@@ -236,9 +228,7 @@
     "sort_by": "price",
     "last_signature": "price|38120001:1.913|38400006:1.949|38240003:1.953|38130002:1.957|38640001:1.957|R:5",
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8136,
-    "update_pin_expires_at": 1794248689.0517764
+    "mode_fouine": false
   },
   "7272524344": {
     "chat_id": 7272524344,
@@ -261,9 +251,7 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8138,
-    "update_pin_expires_at": 1794248689.658256
+    "mode_fouine": false
   },
   "7154715857": {
     "chat_id": 7154715857,
@@ -309,9 +297,7 @@
     "sort_by": "price",
     "last_signature": "price|38470004:0.865|38590001:0.865|38360001:0.868|38180001:0.869|38400006:0.869|R:64",
     "sort_mode": "price",
-    "mode_fouine": true,
-    "update_pin_message_id": 8140,
-    "update_pin_expires_at": 1794248690.402311
+    "mode_fouine": true
   },
   "8217106809": {
     "chat_id": 8217106809,
@@ -338,9 +324,7 @@
     "joined_at": null,
     "saved": [],
     "role": "user",
-    "banned": false,
-    "update_pin_message_id": 8142,
-    "update_pin_expires_at": 1794248690.96855
+    "banned": false
   },
   "1301550393": {
     "chat_id": 1301550393,
@@ -363,9 +347,7 @@
     "sort_by": "price",
     "last_signature": "price|38340012:2.039|38320005:2.045|38120002:2.048|38170004:2.053|38430004:2.059|R:3",
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8144,
-    "update_pin_expires_at": 1794248691.5084136
+    "mode_fouine": false
   },
   "8538132486": {
     "chat_id": 8538132486,
@@ -388,9 +370,7 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false,
-    "update_pin_message_id": 8146,
-    "update_pin_expires_at": 1794248692.067293
+    "mode_fouine": false
   },
   "8390843997": {
     "chat_id": 8390843997,
@@ -430,8 +410,6 @@
     ],
     "role": "user",
     "banned": false,
-    "update_pin_message_id": 8148,
-    "update_pin_expires_at": 1794248692.618935,
     "notifications_enabled": true,
     "quiet_mode": false,
     "quiet_start": "22:00",
