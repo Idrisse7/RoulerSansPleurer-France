@@ -138,7 +138,7 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|42100018:2.051|42100022:2.052|42000015:2.056|42150001:2.071|42390001:2.076|R:2",
+    "last_signature": "price|42100018:2.051|42100022:2.052|42150001:2.071|42390001:2.076|42270002:2.083|R:3",
     "sort_mode": "price",
     "mode_fouine": false,
     "update_pin_message_id": 8132,
