@@ -115,7 +115,7 @@
     "radius": 20,
     "fuel": "SP95-E10",
     "sort_by": "price",
-    "last_signature": "price|73130002:1.949|73300004:1.949|38580004:2.065|73300002:2.089|73870003:2.329|R:5",
+    "last_signature": "price|73300004:1.949|73130002:2.059|38580004:2.065|73300002:2.089|73870003:2.329|R:5",
     "sort_mode": "price",
     "mode_fouine": true
   },
@@ -334,7 +334,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38320005:2.040|38130002:2.047|38360006:2.048|38120002:2.048|38250002:2.058|R:5",
+    "last_signature": "price|38320005:2.040|38130002:2.047|38360006:2.048|38120002:2.048|38250002:2.058|R:6",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
