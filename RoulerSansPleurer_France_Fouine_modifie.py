@@ -53,6 +53,11 @@ DATA_URL = (
 )
 GEO_URL = "https://geo.api.gouv.fr"
 
+# API 2AàZ : le Swagger fourni décrit GET /station/{id}, avec Brand.name.
+BRAND_API_BASE = "https://api.prix-carburants.2aaz.fr"
+BRAND_CACHE_TTL = 24 * 60 * 60
+_BRAND_CACHE = {}
+
 # Les URL de l'API Telegram contiennent le token du bot : on empêche les bibliothèques HTTP
 # de les écrire dans les logs (visibles dans GitHub Actions).
 for _noisy in ("httpx", "httpcore", "aiohttp"):
@@ -1107,6 +1112,49 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
+async def station_brand(session, station_id):
+    """Récupère l'enseigne par identifiant station via l'API 2AàZ."""
+    sid = str(station_id or "").strip()
+    if not sid.isdigit():
+        return ""
+    now = time.time()
+    cached = _BRAND_CACHE.get(sid)
+    if cached and now - cached[0] < BRAND_CACHE_TTL:
+        return cached[1]
+    try:
+        async with session.get(
+            f"{BRAND_API_BASE}/station/{sid}",
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as response:
+            if response.status == 404:
+                _BRAND_CACHE[sid] = (now, "")
+                return ""
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+        brand = payload.get("Brand") or payload.get("brand") or {}
+        name = brand.get("short_name") or brand.get("name") or payload.get("brand_name") or ""
+        name = str(name).strip()
+        _BRAND_CACHE[sid] = (now, name)
+        return name
+    except Exception as exc:
+        logging.debug("API enseigne 2AàZ indisponible pour station %s: %s", sid, exc)
+        return ""
+
+
+async def enrich_station_brands(stations):
+    """Enrichit les stations affichées en parallèle sans bloquer les callbacks."""
+    connector = aiohttp.TCPConnector(limit=8)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        semaphore = asyncio.Semaphore(5)
+
+        async def enrich(station):
+            async with semaphore:
+                station["enseigne"] = await station_brand(session, station.get("id"))
+
+        await asyncio.gather(*(enrich(station) for station in stations))
+    return stations
+
+
 async def prices_for_user(p, sort_by="price"):
     fuel_field = FUEL_FIELD[p["fuel"]]
 
@@ -1183,12 +1231,47 @@ async def prices_for_user(p, sort_by="price"):
         results.sort(key=lambda x: (x["distance"], x["price"]))
     else:
         results.sort(key=lambda x: (x["price"], x["distance"]))
-    return results[:TOP_N]
+    results = results[:TOP_N]
+    await enrich_station_brands(results)
+    return results
 
 
 def maps_url(station):
     query = f"{station['adresse']}, {station['cp']} {station['ville']}"
     return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(query)
+
+
+# Repères visuels par enseigne : Telegram ne permet pas les couleurs HTML
+# personnalisées dans les messages texte. On utilise donc un carré emoji
+# coloré suivi du nom officiel retourné par l'API 2AàZ.
+_BRAND_COLOR_MARKERS = {
+    "total": "🟥", "totalenergies": "🟥", "total energies": "🟥",
+    "leclerc": "🟧", "e.leclerc": "🟧", "eleclerc": "🟧",
+    "carrefour": "🟦", "intermarche": "🟥", "intermarché": "🟥",
+    "auchan": "🟧", "esso": "🟦", "shell": "🟨", "bp": "🟩",
+    "avia": "🟪", "super u": "🟪", "systeme u": "🟪", "système u": "🟪",
+    "casino": "🟩", "netto": "⬛", "cora": "🟥", "g20": "🟩",
+    "elan": "🟦", "élan": "🟦", "eni": "🟧", "agip": "🟥",
+    "dyneff": "🟦",
+}
+
+
+def brand_marker(brand_name):
+    """Retourne un repère coloré sans inventer ni modifier le nom de l'enseigne."""
+    normalized = re.sub(r"[^a-z0-9à-ÿ ]+", "", str(brand_name or "").lower()).strip()
+    normalized = re.sub(r"\\s+", " ", normalized)
+    for key, marker in _BRAND_COLOR_MARKERS.items():
+        key_normalized = re.sub(r"[^a-z0-9à-ÿ ]+", "", key.lower()).strip()
+        if normalized == key_normalized or key_normalized in normalized:
+            return marker
+    return "🔹"
+
+
+def format_brand_badge(brand_name):
+    if not brand_name:
+        return ""
+    safe_name = html.escape(str(brand_name).strip())
+    return f" {brand_marker(brand_name)} <b>{safe_name}</b>"
 
 
 def format_prices(p, stations, sort_by="price", shortages=None):
@@ -1220,7 +1303,9 @@ def format_prices(p, stations, sort_by="price", shortages=None):
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         medal = medals.get(i, "🔷")
         text += (
-            f"{medal} <b>{html.escape(s['ville'])}</b>\n"
+            f"{medal} <b>{html.escape(s['ville'])}</b>"
+            + format_brand_badge(s.get("enseigne"))
+            + "\\n"
             f"💶 <b>{s['price']:.3f} €/L</b> • "
             f"📍 {html.escape(s['adresse'])}, {html.escape(s['cp'])} "
             f"• {html.escape(s['ville'])} • {s['distance']:.1f} km\n"
