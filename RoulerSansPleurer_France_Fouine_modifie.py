@@ -1402,8 +1402,7 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
     if time.time() - pending_at > 300:
         await _delete_nearest_ui_message(context.bot, update.effective_chat.id, prompt_message_id)
         await update.message.reply_text(
-            "⌛ Demande expirée. Appuie à nouveau sur « 📍 Plus proche ».",
-            reply_markup=ReplyKeyboardRemove(),
+            "⌛ Demande expirée. Appuie à nouveau sur « 📍 Plus proche »."
         )
         return MAIN_MENU
 
@@ -1414,8 +1413,7 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
     loc = update.message.location
     if not (-90 <= loc.latitude <= 90 and -180 <= loc.longitude <= 180):
         await update.message.reply_text(
-            "❌ Position GPS invalide. Réessaie avec « 📍 Plus proche ».",
-            reply_markup=ReplyKeyboardRemove(),
+            "❌ Position GPS invalide. Réessaie avec « 📍 Plus proche »."
         )
         return MAIN_MENU
 
@@ -1429,8 +1427,7 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
     temp_p["city"] = "Position actuelle"
 
     searching_message = await update.message.reply_text(
-        "🔎 Recherche des stations autour de ta position…",
-        reply_markup=ReplyKeyboardRemove(),
+        "🔎 Recherche des stations autour de ta position…"
     )
     try:
         stations = await prices_for_user(temp_p, sort_by="distance")
@@ -1453,6 +1450,14 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=main_keyboard(update.effective_chat.id),
     )
     await _delete_nearest_ui_message(context.bot, update.effective_chat.id, searching_message.message_id)
+
+    # Nettoyage de la bulle GPS envoyée par l'utilisateur, uniquement après
+    # que le nouveau résultat a bien été publié. Telegram peut refuser cette
+    # suppression selon le type de chat/droits : dans ce cas, on continue.
+    await _delete_nearest_ui_message(
+        context.bot, update.effective_chat.id, update.message.message_id
+    )
+
     # Seul l'ancien résultat GPS « Plus proche » est remplacé ici.
     # Aucun message d'alerte de prix / Fouine n'est stocké dans cette clé.
     previous_result_id = context.user_data.get("nearest_result_message_id")
@@ -1466,10 +1471,7 @@ async def cancel_nearest_gps(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data.pop("awaiting_nearest_gps_at", None)
     prompt_message_id = context.user_data.pop("nearest_gps_prompt_message_id", None)
     await _delete_nearest_ui_message(context.bot, update.effective_chat.id, prompt_message_id)
-    await update.message.reply_text(
-        "Recherche GPS annulée.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await update.message.reply_text("Recherche GPS annulée.")
     return MAIN_MENU
 
 
