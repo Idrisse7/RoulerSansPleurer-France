@@ -14,7 +14,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -163,24 +162,13 @@ data_lock = asyncio.Lock()
 # ne pas multiplier les push si plusieurs sauvegardes arrivent d'affilée.
 GIT_PUSH_MIN_INTERVAL = 60  # secondes
 _last_git_push = 0.0
-_git_push_lock = threading.Lock()
-_save_file_lock = threading.Lock()
 
 
 def git_commit_and_push():
-    """Synchronise le JSON vers Git en arrière-plan, jamais dans le thread Telegram."""
     global _last_git_push
-    # Une seule synchronisation Git à la fois. Le verrou évite aussi les
-    # multiples threads déclenchés par plusieurs clics rapprochés.
-    if not _git_push_lock.acquire(blocking=False):
-        return
     now = time.time()
     if now - _last_git_push < GIT_PUSH_MIN_INTERVAL:
-        _git_push_lock.release()
         return
-    # Throttle dès le lancement : même un dépôt sans changement ne relance
-    # pas git à chaque clic.
-    _last_git_push = now
     try:
         subprocess.run(
             ["git", "config", "user.email", "bot@users.noreply.github.com"],
@@ -203,12 +191,12 @@ def git_commit_and_push():
                 ["git", "push"],
                 capture_output=True, text=True, timeout=60,
             )
-            if push.returncode != 0:
+            if push.returncode == 0:
+                _last_git_push = now
+            else:
                 print("[GIT] push echoue :", push.stderr.strip())
     except Exception as exc:
         print("[GIT] erreur :", exc)
-    finally:
-        _git_push_lock.release()
 
 
 def load_users():
@@ -234,20 +222,12 @@ def load_users():
 
 
 def save_users():
-    """Sauvegarde locale immédiate; le push Git est déporté hors du bot."""
     raw = json.dumps(users, ensure_ascii=False, indent=2)
-    # Écriture atomique et protégée contre deux sauvegardes simultanées.
-    with _save_file_lock:
-        tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
-        tmp.write_text(raw, encoding="utf-8")
-        os.replace(tmp, USERS_FILE)
-    # Ne jamais exécuter git (qui peut prendre jusqu'à plusieurs dizaines
-    # de secondes) dans le thread de traitement des callbacks Telegram.
-    threading.Thread(
-        target=git_commit_and_push,
-        name="git-users-sync",
-        daemon=True,
-    ).start()
+    # Écriture atomique : un arrêt en plein enregistrement ne peut plus laisser un fichier tronqué.
+    tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
+    tmp.write_text(raw, encoding="utf-8")
+    os.replace(tmp, USERS_FILE)
+    git_commit_and_push()
 
 
 def user_profile(chat_id):
@@ -311,9 +291,7 @@ def update_user_identity(user, profile):
 
 
 async def get_json(session, url, params=None):
-    # Délais bornés pour éviter qu'une API publique lente bloque une interaction.
-    timeout = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
-    async with session.get(url, params=params, timeout=timeout) as r:
+    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
         r.raise_for_status()
         return await r.json()
 
@@ -1129,243 +1107,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
-# L'API officielle des prix ne fournit pas le nom ni la marque des stations.
-# On rapproche donc les coordonnées officielles des stations-service OpenStreetMap.
-# Une seule requête Overpass groupée évite de lancer une requête par station.
-OVERPASS_URLS = (
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-)
-_BRAND_CACHE = {}
-_BRAND_CACHE_TTL = 24 * 60 * 60
-_BRAND_UNKNOWN_CACHE_TTL = 5 * 60
-
-BRAND_STYLES = [
-    (("totalenergies", "total access", "total"), "🔴", "Total"),
-    (("e leclerc", "leclerc"), "🟠", "E.Leclerc"),
-    (("carrefour",), "🔵", "Carrefour"),
-    (("intermarche",), "🟥", "Intermarché"),
-    (("auchan",), "🟧", "Auchan"),
-    (("esso",), "🟦", "Esso"),
-    (("shell",), "🟡", "Shell"),
-    (("british petroleum", "bp france"), "🟢", "BP"),
-    (("avia",), "🟣", "Avia"),
-    (("systeme u", "super u", "u express", "hyper u"), "🟪", "Système U"),
-    (("casino",), "🟩", "Casino"),
-    (("netto",), "⬛", "Netto"),
-    (("cora",), "🔴", "Cora"),
-    (("g20",), "🟢", "G20"),
-    (("elan",), "🔵", "Élan"),
-    (("eni", "agip"), "🟡", "Eni / Agip"),
-    (("dyneff",), "🟣", "Dyneff"),
-]
-
-
-def _brand_normalize(value):
-    value = str(value or "").casefold()
-    value = (value.replace("é", "e").replace("è", "e")
-                  .replace("ê", "e").replace("ë", "e")
-                  .replace("à", "a").replace("â", "a")
-                  .replace("î", "i").replace("ï", "i")
-                  .replace("ô", "o").replace("ù", "u")
-                  .replace("û", "u").replace("ç", "c"))
-    return re.sub(r"[^a-z0-9]+", " ", value).strip()
-
-
-def identify_brand(*values):
-    """Reconnaît une enseigne à partir des tags de marque, exploitant ou nom OSM."""
-    raw_values = [str(v or "").strip() for v in values if str(v or "").strip()]
-    normalized_values = [_brand_normalize(v) for v in raw_values]
-
-    # BP est trop court pour une recherche par sous-chaîne : on exige un champ exact.
-    if any(v in {"bp", "b p"} for v in normalized_values):
-        return {"brand": "BP", "brand_emoji": "🟢"}
-
-    combined = " " + " ".join(normalized_values) + " "
-    for aliases, emoji, label in BRAND_STYLES:
-        for alias in aliases:
-            needle = _brand_normalize(alias)
-            if needle and (" " + needle + " ") in combined:
-                return {"brand": label, "brand_emoji": emoji}
-    return {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
-
-
-def _station_cache_key(station):
-    return (round(float(station["lat"]), 4), round(float(station["lon"]), 4))
-
-
-async def enrich_station_brands(stations):
-    """Associe les stations officielles aux stations OSM proches en une seule requête."""
-    if not stations:
-        return
-
-    now = time.time()
-    pending = []
-    for station in stations:
-        key = _station_cache_key(station)
-        cached = _BRAND_CACHE.get(key)
-        if cached:
-            ttl = (_BRAND_CACHE_TTL if cached[1].get("brand") != "Enseigne inconnue"
-                   else _BRAND_UNKNOWN_CACHE_TTL)
-            if now - cached[0] < ttl:
-                station.update(cached[1])
-                continue
-        pending.append(station)
-
-    if not pending:
-        return
-
-    # Une requête nwr par station : nwr couvre nodes, ways et relations.
-    selectors = []
-    for station in pending:
-        lat, lon = float(station["lat"]), float(station["lon"])
-        selectors.append(
-            f'nwr(around:1200,{lat:.6f},{lon:.6f})["amenity"="fuel"];'
-        )
-    query = "[out:json][timeout:25];(" + "".join(selectors) + ");out center;"
-
-    payload = None
-    headers = {
-        "User-Agent": "RoulerSansPleurer/1.3 (station-brand matching; contact via Telegram)"
-    }
-    timeout = aiohttp.ClientTimeout(total=11, connect=4, sock_read=8)
-    # Une session partagée pour les miroirs. Le second est réellement essayé
-    # si le premier échoue, sans multiplier les connexions TCP.
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        for endpoint in OVERPASS_URLS:
-            try:
-                async with session.post(
-                    endpoint, data={"data": query}, timeout=timeout
-                ) as response:
-                    response.raise_for_status()
-                    payload = await response.json(content_type=None)
-                if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
-                    break
-                payload = None
-            except Exception as exc:
-                logging.warning("Recherche enseignes Overpass échouée (%s): %s", endpoint, exc)
-                payload = None
-
-    if payload and payload.get("remark"):
-        logging.warning("Overpass a renvoyé une remarque : %s", payload.get("remark"))
-    elements = (payload or {}).get("elements", [])
-    logging.info(
-        "Enrichissement enseignes : %d objets OSM reçus pour %d stations.",
-        len(elements), len(pending)
-    )
-
-    candidates = []
-    for element in elements:
-        tags = element.get("tags") or {}
-        point = element.get("center") or element
-        try:
-            osm_lat, osm_lon = float(point["lat"]), float(point["lon"])
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        brand = identify_brand(
-            tags.get("brand"),
-            tags.get("brand:fr"),
-            tags.get("brand:en"),
-            tags.get("operator"),
-            tags.get("operator:short"),
-            tags.get("name"),
-            tags.get("name:fr"),
-            tags.get("name:en"),
-            tags.get("official_name"),
-            tags.get("short_name"),
-        )
-        candidates.append((osm_lat, osm_lon, tags, brand))
-
-    for station in pending:
-        best = None
-        address = _brand_normalize(station.get("adresse", ""))
-        postcode = _brand_normalize(station.get("cp", ""))
-        city = _brand_normalize(station.get("ville", ""))
-
-        for osm_lat, osm_lon, tags, brand in candidates:
-            if brand["brand"] == "Enseigne inconnue":
-                continue
-
-            distance_m = haversine_km(
-                float(station["lat"]), float(station["lon"]), osm_lat, osm_lon
-            ) * 1000
-            osm_street = _brand_normalize(tags.get("addr:street", ""))
-            osm_postcode = _brand_normalize(tags.get("addr:postcode", ""))
-            osm_city = _brand_normalize(
-                tags.get("addr:city") or tags.get("addr:town")
-                or tags.get("addr:village", "")
-            )
-
-            street_match = bool(osm_street and osm_street in address)
-            postcode_match = bool(postcode and osm_postcode and postcode == osm_postcode)
-            city_match = bool(city and osm_city and (city == osm_city or city in osm_city))
-            address_match = street_match or postcode_match
-
-            # Les coordonnées officielles peuvent pointer vers l'entrée ou le
-            # centre administratif du site, tandis qu'OSM place le point au
-            # centre du terrain. Ne pas exiger une adresse OSM (souvent absente).
-            # En revanche, sans concordance d'adresse, on limite le rayon et on
-            # refusera les cas ambigus entre plusieurs enseignes voisines.
-            max_distance = 1200 if address_match else (700 if city_match else 500)
-            if distance_m > max_distance:
-                continue
-
-            score = distance_m
-            if street_match:
-                score -= 650
-            if postcode_match:
-                score -= 300
-            if city_match:
-                score -= 100
-            if best is None or score < best[0]:
-                best = (score, brand, distance_m, tags)
-
-        if best:
-            # Si plusieurs enseignes différentes sont à des distances presque
-            # identiques et qu'aucune adresse ne confirme le rapprochement,
-            # ne pas attribuer une marque au hasard.
-            alternatives = []
-            for osm_lat, osm_lon, tags, brand in candidates:
-                if brand["brand"] == "Enseigne inconnue":
-                    continue
-                d = haversine_km(float(station["lat"]), float(station["lon"]), osm_lat, osm_lon) * 1000
-                osm_street = _brand_normalize(tags.get("addr:street", ""))
-                osm_postcode = _brand_normalize(tags.get("addr:postcode", ""))
-                street_ok = bool(osm_street and osm_street in address)
-                postcode_ok = bool(postcode and osm_postcode and postcode == osm_postcode)
-                city_ok = bool(city and _brand_normalize(tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village", "")) == city)
-                limit = 1200 if (street_ok or postcode_ok) else (700 if city_ok else 500)
-                if d <= limit:
-                    alternatives.append((d, brand["brand"], street_ok or postcode_ok))
-            alternatives.sort(key=lambda x: x[0])
-            distinct = {b for _, b, _ in alternatives[:3]}
-            confirmed_by_address = best[3].get("addr:street") or best[3].get("addr:postcode")
-            if len(distinct) > 1 and not confirmed_by_address:
-                result = {"brand": "Enseigne à confirmer", "brand_emoji": "❔"}
-                logging.warning(
-                    "Rapprochement ambigu pour %s : %s",
-                    station.get("ville", "?"), alternatives[:3]
-                )
-            else:
-                result = best[1]
-                logging.info(
-                    "Enseigne associée : %s — %s (%.0f m)",
-                    station.get("ville", "?"), result["brand"], best[2]
-                )
-        else:
-            result = {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
-            logging.info(
-                "Enseigne non trouvée : %s, %s, %s (%.6f, %.6f)",
-                station.get("ville", "?"), station.get("adresse", ""),
-                station.get("cp", ""), float(station["lat"]), float(station["lon"])
-            )
-
-        _BRAND_CACHE[_station_cache_key(station)] = (now, result)
-        station.update(result)
-
-
 async def prices_for_user(p, sort_by="price"):
     fuel_field = FUEL_FIELD[p["fuel"]]
 
@@ -1442,18 +1183,7 @@ async def prices_for_user(p, sort_by="price"):
         results.sort(key=lambda x: (x["distance"], x["price"]))
     else:
         results.sort(key=lambda x: (x["price"], x["distance"]))
-
-    # L'identification des enseignes est facultative : elle ne doit jamais
-    # retarder l'affichage des prix ni bloquer les boutons Telegram.
-    selected = results[:TOP_N]
-    try:
-        await asyncio.wait_for(enrich_station_brands(selected), timeout=12.5)
-    except Exception as exc:
-        logging.warning("Identification des enseignes ignorée (délai dépassé/erreur) : %s", exc)
-        for station in selected:
-            station.setdefault("brand", "Enseigne inconnue")
-            station.setdefault("brand_emoji", "⬜")
-    return selected
+    return results[:TOP_N]
 
 
 def maps_url(station):
@@ -1489,11 +1219,8 @@ def format_prices(p, stations, sort_by="price", shortages=None):
     for i, s in enumerate(stations, 1):
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         medal = medals.get(i, "🔷")
-        # L'enseigne est affichée directement à côté de la ville, sur la même ligne.
-        # Cela évite une ligne séparée et rend l'identification immédiate dans Telegram.
         text += (
-            f"{medal} <b>{html.escape(s['ville'])}</b> "
-            f"{s.get('brand_emoji', '⬜')} <b>{html.escape(s.get('brand', 'Enseigne inconnue'))}</b>\n"
+            f"{medal} <b>{html.escape(s['ville'])}</b>\n"
             f"💶 <b>{s['price']:.3f} €/L</b> • "
             f"📍 {html.escape(s['adresse'])}, {html.escape(s['cp'])} "
             f"• {html.escape(s['ville'])} • {s['distance']:.1f} km\n"
@@ -1522,13 +1249,11 @@ async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("❌ Configure d'abord ta localisation avec /start.")
         return MAIN_MENU
     try:
-        stations, shortages = await asyncio.gather(
-            prices_for_user(p, sort_by="distance"),
-            shortages_for_user(p),
-        )
+        stations = await prices_for_user(p, sort_by="distance")
     except Exception:
         await q.edit_message_text("❌ Impossible de récupérer les stations actuellement.")
         return MAIN_MENU
+    shortages = await shortages_for_user(p)
     await q.edit_message_text(
         format_prices(p, stations, sort_by="distance", shortages=shortages),
         parse_mode=ParseMode.HTML,
@@ -1595,17 +1320,15 @@ async def show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
 
     try:
-        stations, shortages = await asyncio.gather(
-            prices_for_user(p),
-            shortages_for_user(p),
-        )
-    except Exception:
+        stations = await prices_for_user(p)
+    except Exception as e:
         await q.edit_message_text(
-            "❌ Impossible de récupérer les prix actuellement.\\n"
+            "❌ Impossible de récupérer les prix actuellement.\n"
             "Réessaie dans quelques secondes."
         )
         return MAIN_MENU
 
+    shortages = await shortages_for_user(p)
     await q.edit_message_text(
         format_prices(p, stations, shortages=shortages),
         parse_mode=ParseMode.HTML,
