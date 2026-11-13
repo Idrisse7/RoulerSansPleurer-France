@@ -444,9 +444,6 @@ async def shortages_for_user(p, show=3):
             except Exception:
                 dist = None
             stations.append({
-                "id": f.get("id"),
-                "lat": lat if dist is not None else None,
-                "lon": lon if dist is not None else None,
                 "ville": f.get("ville", ""),
                 "adresse": f.get("adresse", ""),
                 "cp": f.get("cp", ""),
@@ -460,9 +457,7 @@ async def shortages_for_user(p, show=3):
                 ),
             })
         stations.sort(key=lambda s: (s["distance"] is None, s["distance"] or 0))
-        top = stations[:show]
-        await attach_brands(top)
-        return {"total": data.get("total_count", len(stations)), "stations": top}
+        return {"total": data.get("total_count", len(stations)), "stations": stations[:show]}
     except Exception as exc:
         print("[RUPTURES] indisponible :", exc)
         return None
@@ -479,7 +474,7 @@ def shortage_block(p, shortages):
         dist = f" • {s['distance']:.1f} km" if s["distance"] is not None else ""
         kind = "" if s["kind"] == "rupture" else f" ({s['kind']})"
         text += (
-            f"⛔ {html.escape(s['ville'])}{brand_tag(s)} — {html.escape(s['adresse'])}"
+            f"⛔ {html.escape(s['ville'])} — {html.escape(s['adresse'])}"
             f"{dist}{kind}\n"
         )
     return text + "\n"
@@ -1112,163 +1107,110 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
-# ───────────────── Enseignes des stations (OpenStreetMap) ─────────────────
-# Le flux officiel des prix ne contient PAS l'enseigne (Total, Carrefour, Leclerc…).
-# On la récupère via OpenStreetMap (Overpass) en cherchant la station la plus proche
-# des coordonnées GPS, puis on la garde en cache pour ne pas refaire la requête.
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
+# L'API officielle des prix ne fournit pas le nom de l'enseigne.
+# On enrichit donc, quand OpenStreetMap dispose de l'information, par proximité GPS.
+# Si aucune enseigne fiable n'est trouvée, on affiche explicitement "Inconnue".
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+_BRAND_CACHE = {}
+_BRAND_CACHE_TTL = 24 * 60 * 60
+
+BRAND_STYLES = [
+    (("totalenergies", "total"), "🔴", "Total"),
+    (("e.leclerc", "leclerc"), "🟠", "E.Leclerc"),
+    (("carrefour",), "🔵", "Carrefour"),
+    (("intermarche", "intermarché"), "🟥", "Intermarché"),
+    (("auchan",), "🟧", "Auchan"),
+    (("esso",), "🟦", "Esso"),
+    (("shell",), "🟡", "Shell"),
+    (("bp", "british petroleum"), "🟢", "BP"),
+    (("avia",), "🟣", "Avia"),
+    (("systeme u", "système u", "super u", "u express", "hyper u"), "🟪", "Système U"),
+    (("casino",), "🟩", "Casino"),
+    (("netto",), "⬛", "Netto"),
+    (("cora",), "🔴", "Cora"),
+    (("g20",), "🟢", "G20"),
+    (("elan", "élan"), "🔵", "Élan"),
+    (("eni", "agip"), "🟡", "Eni / Agip"),
+    (("dyneff",), "🟣", "Dyneff"),
 ]
-BRAND_MATCH_RADIUS_M = 200
-BRAND_CACHE_TTL = 7 * 24 * 3600
-_BRAND_CACHE = {}  # id station -> (enseigne ou None, horodatage)
 
 
-def _clean_brand(tags):
-    """Choisit le meilleur nom d'enseigne dans les tags OSM."""
-    for key in ("brand", "operator", "name"):
-        value = str(tags.get(key) or "").strip()
-        if value:
-            return value[:40]
-    return None
+def identify_brand(*values):
+    """Retourne une enseigne reconnue à partir des tags OSM, sans deviner."""
+    combined = " ".join(str(v or "") for v in values).casefold()
+    normalized = combined.replace("é", "e").replace("è", "e").replace("ê", "e")
+    for aliases, emoji, label in BRAND_STYLES:
+        if any(alias.casefold() in combined or alias.casefold() in normalized for alias in aliases):
+            return {"brand": label, "brand_emoji": emoji}
+    return {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
 
 
-_BRAND_FAIL_UNTIL = 0.0   # après un échec Overpass, on laisse tranquille jusqu'à cette heure
-_BRAND_INFLIGHT = set()    # ids déjà en cours de recherche
-BRAND_WAIT_SECONDS = 4.0   # attente MAX côté bouton ; le cron de 10 min réchauffe le cache
-OVERPASS_HEADERS = {"User-Agent": "RoulerSansPleurerBot/1.0 (telegram fuel bot)"}
-
-
-async def _overpass_query(session, query):
-    """Essaie chaque miroir Overpass. Tourne en arrière-plan : ne bloque aucun bouton."""
-    for url in OVERPASS_URLS:
-        try:
-            async with session.post(
-                url, data={"data": query}, headers=OVERPASS_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=12),
-            ) as r:
-                if r.status != 200:
-                    print(f"[ENSEIGNE] {url} -> HTTP {r.status}")
-                    continue
-                return await r.json(content_type=None)
-        except Exception as exc:
-            print(f"[ENSEIGNE] {url} indisponible : {exc!r}")
-    return None
-
-
-async def _fetch_brands(todo):
-    """Tâche de fond : interroge OpenStreetMap et remplit le cache."""
-    global _BRAND_FAIL_UNTIL
-    ids = [s.get("id") for s in todo]
-    try:
-        around = "".join(
-            f'nwr["amenity"="fuel"](around:{BRAND_MATCH_RADIUS_M},{float(s["lat"])},{float(s["lon"])});'
-            for s in todo
-        )
-        query = f"[out:json][timeout:10];({around});out center tags;"
-        async with aiohttp.ClientSession() as session:
-            data = await _overpass_query(session, query)
-        if data is None:
-            _BRAND_FAIL_UNTIL = time.time() + 120
-            return
-        candidates = []
-        for el in data.get("elements", []):
-            lat = el.get("lat", (el.get("center") or {}).get("lat"))
-            lon = el.get("lon", (el.get("center") or {}).get("lon"))
-            brand = _clean_brand(el.get("tags") or {})
-            if lat is not None and lon is not None and brand:
-                candidates.append((float(lat), float(lon), brand))
-        now = time.time()
-        for s in todo:
-            best, best_d = None, BRAND_MATCH_RADIUS_M / 1000.0
-            for lat, lon, brand in candidates:
-                d = haversine_km(float(s["lat"]), float(s["lon"]), lat, lon)
-                if d <= best_d:
-                    best, best_d = brand, d
-            s["enseigne"] = best
-            if s.get("id") is not None:
-                _BRAND_CACHE[s["id"]] = (best, now)
-        if len(_BRAND_CACHE) > 20000:
-            _BRAND_CACHE.clear()
-    except Exception as exc:
-        print("[ENSEIGNE] erreur :", exc)
-        _BRAND_FAIL_UNTIL = time.time() + 120
-    finally:
-        for i in ids:
-            _BRAND_INFLIGHT.discard(i)
-
-
-async def attach_brands(stations):
-    """Ajoute 'enseigne' à chaque station SANS jamais bloquer : cache d'abord, puis
-    recherche en arrière-plan (attente max BRAND_WAIT_SECONDS). Ne lève jamais d'erreur."""
+async def lookup_station_brand(session, station):
+    """Cherche une station OSM à moins de 100 m. Résultat mis en cache 24 h."""
+    cache_key = (round(station["lat"], 4), round(station["lon"], 4))
+    cached = _BRAND_CACHE.get(cache_key)
     now = time.time()
-    todo = []
-    for s in stations:
-        s["enseigne"] = None
-        cached = _BRAND_CACHE.get(s.get("id"))
-        if cached and now - cached[1] < BRAND_CACHE_TTL:
-            s["enseigne"] = cached[0]
-        elif (s.get("lat") is not None and s.get("lon") is not None
-              and s.get("id") not in _BRAND_INFLIGHT):
-            todo.append(s)
-    if not todo or now < _BRAND_FAIL_UNTIL:
-        return stations
+    if cached and now - cached[0] < _BRAND_CACHE_TTL:
+        station.update(cached[1])
+        return
+
+    query = (
+        "[out:json][timeout:8];("
+        f'node(around:100,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
+        f'way(around:100,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
+        f'relation(around:100,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
+        ");out center tags;"
+    )
+    result = {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
     try:
-        for s in todo:
-            _BRAND_INFLIGHT.add(s.get("id"))
-        task = asyncio.create_task(_fetch_brands(todo))
-        await asyncio.wait_for(asyncio.shield(task), timeout=BRAND_WAIT_SECONDS)
-    except asyncio.TimeoutError:
-        pass  # la tâche continue en fond ; l'enseigne apparaîtra au prochain affichage
+        async with session.post(
+            OVERPASS_URL, data={"data": query},
+            timeout=aiohttp.ClientTimeout(total=10),
+            headers={"User-Agent": "RoulerSansPleurer/1.0 (station brand lookup)"},
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json()
+        candidates = []
+        for element in payload.get("elements", []):
+            tags = element.get("tags", {})
+            point = element.get("center") or element
+            try:
+                distance = haversine_km(
+                    station["lat"], station["lon"],
+                    float(point["lat"]), float(point["lon"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            brand = identify_brand(
+                tags.get("brand"), tags.get("operator"), tags.get("name"),
+                tags.get("brand:wikidata"),
+            )
+            if brand["brand"] != "Enseigne inconnue":
+                candidates.append((distance, brand))
+        if candidates:
+            result = min(candidates, key=lambda item: item[0])[1]
     except Exception as exc:
-        print("[ENSEIGNE] erreur :", exc)
-    return stations
+        logging.debug("Enrichissement enseigne indisponible : %s", exc)
+
+    _BRAND_CACHE[cache_key] = (now, result)
+    station.update(result)
 
 
-# Telegram ne permet pas d'insérer de vraies images dans le texte : on utilise
-# un emoji aux couleurs de la marque (mot-clé en minuscules -> emoji).
-BRAND_EMOJI = [
-    ("total", "🔴"),
-    ("leclerc", "🟠"),
-    ("carrefour", "🔵"),
-    ("intermarch", "🟥"),
-    ("auchan", "🟧"),
-    ("esso", "🟦"),
-    ("shell", "🟡"),
-    ("bp", "🟢"),
-    ("avia", "🟣"),
-    ("super u", "🟪"),
-    ("système u", "🟪"),
-    ("systeme u", "🟪"),
-    ("casino", "🟩"),
-    ("netto", "⬛"),
-    ("cora", "🔶"),
-    ("g20", "🔷"),
-    ("elan", "🟤"),
-    ("eni", "🟨"),
-    ("agip", "🟨"),
-    ("dyneff", "🔺"),
-    ("vitalis", "⚪"),
-]
-
-
-def brand_emoji(name):
-    low = (name or "").lower()
-    for key, emoji in BRAND_EMOJI:
-        if key == "bp":
-            if re.search(r"\bbp\b", low):
-                return emoji
-        elif key in low:
-            return emoji
-    return "⛽"
-
-
-def brand_tag(s):
-    """Texte HTML ' — 🔴 Total' à coller après le nom de la ville (vide si inconnue)."""
-    if not s.get("enseigne"):
-        return ""
-    return f" — {brand_emoji(s['enseigne'])} <b>{html.escape(s['enseigne'])}</b>"
+async def enrich_station_brands(stations):
+    """Enrichit les stations en parallèle; une panne OSM ne bloque jamais les prix."""
+    if not stations:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            await asyncio.gather(
+                *(lookup_station_brand(session, station) for station in stations),
+                return_exceptions=True,
+            )
+    except Exception as exc:
+        logging.debug("Enrichissement enseignes indisponible : %s", exc)
+    for station in stations:
+        station.setdefault("brand", "Enseigne inconnue")
+        station.setdefault("brand_emoji", "⬜")
 
 
 async def prices_for_user(p, sort_by="price"):
@@ -1347,9 +1289,11 @@ async def prices_for_user(p, sort_by="price"):
         results.sort(key=lambda x: (x["distance"], x["price"]))
     else:
         results.sort(key=lambda x: (x["price"], x["distance"]))
-    top = results[:TOP_N]
-    await attach_brands(top)
-    return top
+
+    # On enrichit uniquement les stations effectivement affichées.
+    selected = results[:TOP_N]
+    await enrich_station_brands(selected)
+    return selected
 
 
 def maps_url(station):
@@ -1386,7 +1330,8 @@ def format_prices(p, stations, sort_by="price", shortages=None):
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         medal = medals.get(i, "🔷")
         text += (
-            f"{medal} <b>{html.escape(s['ville'])}</b>{brand_tag(s)}\n"
+            f"{medal} <b>{html.escape(s['ville'])}</b>\n"
+            f"{s.get('brand_emoji', '⬜')} <b>{html.escape(s.get('brand', 'Enseigne inconnue'))}</b>\\n"
             f"💶 <b>{s['price']:.3f} €/L</b> • "
             f"📍 {html.escape(s['adresse'])}, {html.escape(s['cp'])} "
             f"• {html.escape(s['ville'])} • {s['distance']:.1f} km\n"
@@ -1455,7 +1400,7 @@ async def show_ruptures(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dist = f" • {st['distance']:.1f} km" if st["distance"] is not None else ""
             kind = "" if st["kind"] == "rupture" else f" ({st['kind']})"
             text += (
-                f"⛔ <b>{html.escape(st['ville'])}</b>{brand_tag(st)}{dist}{kind}\n"
+                f"⛔ <b>{html.escape(st['ville'])}</b>{dist}{kind}\n"
                 f"📍 {html.escape(st['adresse'])}, {html.escape(st['cp'])}\n"
             )
             if st["others"]:
@@ -2268,45 +2213,6 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
 
-async def test_enseigne(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/testenseigne (équipe uniquement) : montre si OpenStreetMap répond depuis le serveur du bot."""
-    chat_id = update.effective_chat.id
-    if not is_staff(chat_id):
-        return
-    p = user_profile(chat_id)
-    if p.get("lat") is None:
-        await update.message.reply_text("Configure d'abord ta localisation avec /start.")
-        return
-    query = (
-        '[out:json][timeout:10];'
-        f'nwr["amenity"="fuel"](around:3000,{float(p["lat"])},{float(p["lon"])});'
-        'out center tags;'
-    )
-    lines = ["🔎 <b>Test enseignes (OpenStreetMap)</b>\n"]
-    async with aiohttp.ClientSession() as session:
-        for url in OVERPASS_URLS:
-            host = html.escape(url.split("/")[2])
-            t0 = time.time()
-            try:
-                async with session.post(
-                    url, data={"data": query}, headers=OVERPASS_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as r:
-                    if r.status != 200:
-                        lines.append(f"❌ {host} : HTTP {r.status}")
-                        continue
-                    data = await r.json(content_type=None)
-                els = data.get("elements", [])
-                names = [b for b in (_clean_brand(e.get("tags") or {}) for e in els) if b]
-                lines.append(
-                    f"✅ {host} : {len(els)} station(s), {time.time() - t0:.1f}s\n"
-                    + ", ".join(html.escape(n) for n in names[:8])
-                )
-            except Exception as exc:
-                lines.append(f"❌ {host} : {html.escape(repr(exc)[:120])}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-
 async def post_init(application: Application):
     load_users()
     # Restaure les retraits d'épingles après un redémarrage du bot.
@@ -2418,7 +2324,6 @@ def build_application():
     # Administration : indépendante de l'état de la conversation principale.
     app.add_handler(CallbackQueryHandler(adm_router, pattern=r"^ADM:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=1)
-    app.add_handler(CommandHandler("testenseigne", test_enseigne))
     app.add_handler(conv)
     app.job_queue.run_repeating(price_check_job, interval=REFRESH_SECONDS, first=10)
     return app
