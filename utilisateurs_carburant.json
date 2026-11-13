@@ -18,7 +18,7 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": null,
+    "last_signature": "price|38360006:2.043|38120002:2.043|38120001:2.049|38700003:2.054|38170004:2.054",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
@@ -67,7 +67,9 @@
     "sort_by": "price",
     "last_signature": "price|75015036:0.825|60000001:0.907|60000012:0.941|78370002:0.946|95650002:0.949|R:904",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9716,
+    "update_pin_expires_at": 1794678781.0790234
   },
   "6560194691": {
     "chat_id": 6560194691,
@@ -90,7 +92,9 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9718,
+    "update_pin_expires_at": 1794678781.4660065
   },
   "945467587": {
     "chat_id": 945467587,
@@ -136,7 +140,9 @@
     "sort_by": "price",
     "last_signature": "price|42000014:2.032|42100018:2.032|42000015:2.035|42100022:2.045|42390001:2.045",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9720,
+    "update_pin_expires_at": 1794678781.9850469
   },
   "1654216330": {
     "chat_id": 1654216330,
@@ -207,7 +213,9 @@
     "sort_by": "price",
     "last_signature": "price|38120002:2.043|38360006:2.043|38120001:2.049|38170004:2.054|38700003:2.054|R:3",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9722,
+    "update_pin_expires_at": 1794678782.6849682
   },
   "5336428591": {
     "chat_id": 5336428591,
@@ -230,7 +238,9 @@
     "sort_by": "price",
     "last_signature": "price|38700003:1.924|38240003:1.924|38240006:1.924|38400006:1.934|38170004:1.937|R:3",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9724,
+    "update_pin_expires_at": 1794678783.0316343
   },
   "7272524344": {
     "chat_id": 7272524344,
@@ -253,7 +263,9 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9726,
+    "update_pin_expires_at": 1794678783.3935986
   },
   "7154715857": {
     "chat_id": 7154715857,
@@ -299,7 +311,9 @@
     "sort_by": "price",
     "last_signature": "price|38360001:0.834|38180001:0.858|38380003:0.858|38470004:0.858|38350004:0.858|R:68",
     "sort_mode": "price",
-    "mode_fouine": true
+    "mode_fouine": true,
+    "update_pin_message_id": 9728,
+    "update_pin_expires_at": 1794678783.9356816
   },
   "8217106809": {
     "chat_id": 8217106809,
@@ -326,7 +340,9 @@
     "joined_at": null,
     "saved": [],
     "role": "user",
-    "banned": false
+    "banned": false,
+    "update_pin_message_id": 9730,
+    "update_pin_expires_at": 1794678784.3047407
   },
   "1301550393": {
     "chat_id": 1301550393,
@@ -349,7 +365,9 @@
     "sort_by": "price",
     "last_signature": "price|38360006:2.043|38120002:2.043|38120001:2.049|38170004:2.054|38700003:2.054|R:1",
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9732,
+    "update_pin_expires_at": 1794678784.6957717
   },
   "8538132486": {
     "chat_id": 8538132486,
@@ -372,7 +390,9 @@
     "sort_by": "price",
     "last_signature": null,
     "sort_mode": "price",
-    "mode_fouine": false
+    "mode_fouine": false,
+    "update_pin_message_id": 9734,
+    "update_pin_expires_at": 1794678785.0876203
   },
   "8390843997": {
     "chat_id": 8390843997,
@@ -393,8 +413,8 @@
     "radius": 10,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "distance|38100013:2.169|38000018:2.229|38000019:2.229|38100003:2.249|38170004:2.054",
-    "sort_mode": "distance",
+    "last_signature": null,
+    "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": "2026-11-03 13:10",
     "saved": [
@@ -417,6 +437,8 @@
     "quiet_start": "22:00",
     "quiet_end": "08:00",
     "quiet_timezone": "Europe/Paris",
-    "pending_notifications": []
+    "pending_notifications": [],
+    "update_pin_message_id": 9736,
+    "update_pin_expires_at": 1794678785.4274037
   }
 }
