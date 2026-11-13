@@ -1110,9 +1110,14 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # L'API officielle des prix ne fournit pas le nom de l'enseigne.
 # On enrichit donc, quand OpenStreetMap dispose de l'information, par proximité GPS.
 # Si aucune enseigne fiable n'est trouvée, on affiche explicitement "Inconnue".
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+)
 _BRAND_CACHE = {}
 _BRAND_CACHE_TTL = 24 * 60 * 60
+_BRAND_UNKNOWN_CACHE_TTL = 15 * 60
 
 BRAND_STYLES = [
     (("totalenergies", "total"), "🔴", "Total"),
@@ -1146,51 +1151,61 @@ def identify_brand(*values):
 
 
 async def lookup_station_brand(session, station):
-    """Cherche une station OSM à moins de 100 m. Résultat mis en cache 24 h."""
+    """Cherche une station-service OSM autour du point officiel de la station."""
     cache_key = (round(station["lat"], 4), round(station["lon"], 4))
     cached = _BRAND_CACHE.get(cache_key)
     now = time.time()
-    if cached and now - cached[0] < _BRAND_CACHE_TTL:
-        station.update(cached[1])
-        return
+    if cached:
+        ttl = _BRAND_CACHE_TTL if cached[1].get("brand") != "Enseigne inconnue" else _BRAND_UNKNOWN_CACHE_TTL
+        if now - cached[0] < ttl:
+            station.update(cached[1])
+            return
 
+    # 300 m tolèrent les différences de géolocalisation entre les deux bases.
     query = (
-        "[out:json][timeout:8];("
-        f'node(around:100,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
-        f'way(around:100,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
-        f'relation(around:100,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
+        "[out:json][timeout:15];("
+        f'node(around:300,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
+        f'way(around:300,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
+        f'relation(around:300,{station["lat"]},{station["lon"]})["amenity"="fuel"];'
         ");out center tags;"
     )
     result = {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
-    try:
-        async with session.post(
-            OVERPASS_URL, data={"data": query},
-            timeout=aiohttp.ClientTimeout(total=10),
-            headers={"User-Agent": "RoulerSansPleurer/1.0 (station brand lookup)"},
-        ) as response:
-            response.raise_for_status()
-            payload = await response.json()
-        candidates = []
-        for element in payload.get("elements", []):
-            tags = element.get("tags", {})
-            point = element.get("center") or element
-            try:
-                distance = haversine_km(
-                    station["lat"], station["lon"],
-                    float(point["lat"]), float(point["lon"]),
+    headers = {"User-Agent": "RoulerSansPleurer/1.1 (station brand lookup)"}
+    for endpoint in OVERPASS_URLS:
+        try:
+            async with session.post(
+                endpoint,
+                data={"data": query},
+                timeout=aiohttp.ClientTimeout(total=20),
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json(content_type=None)
+
+            candidates = []
+            for element in payload.get("elements", []):
+                tags = element.get("tags", {})
+                point = element.get("center") or element
+                try:
+                    distance = haversine_km(
+                        station["lat"], station["lon"],
+                        float(point["lat"]), float(point["lon"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                brand = identify_brand(
+                    tags.get("brand"), tags.get("brand:en"), tags.get("operator"),
+                    tags.get("name"), tags.get("brand:wikidata"),
                 )
-            except (KeyError, TypeError, ValueError):
-                continue
-            brand = identify_brand(
-                tags.get("brand"), tags.get("operator"), tags.get("name"),
-                tags.get("brand:wikidata"),
-            )
-            if brand["brand"] != "Enseigne inconnue":
-                candidates.append((distance, brand))
-        if candidates:
-            result = min(candidates, key=lambda item: item[0])[1]
-    except Exception as exc:
-        logging.debug("Enrichissement enseigne indisponible : %s", exc)
+                if brand["brand"] != "Enseigne inconnue":
+                    candidates.append((distance, brand))
+            if candidates:
+                result = min(candidates, key=lambda item: item[0])[1]
+            # Une réponse valide, même sans enseigne, suffit : inutile de solliciter les miroirs.
+            break
+        except Exception as exc:
+            logging.debug("Overpass indisponible (%s) : %s", endpoint, exc)
+            continue
 
     _BRAND_CACHE[cache_key] = (now, result)
     station.update(result)
@@ -1329,9 +1344,11 @@ def format_prices(p, stations, sort_by="price", shortages=None):
     for i, s in enumerate(stations, 1):
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         medal = medals.get(i, "🔷")
+        # L'enseigne est affichée directement à côté de la ville, sur la même ligne.
+        # Cela évite une ligne séparée et rend l'identification immédiate dans Telegram.
         text += (
-            f"{medal} <b>{html.escape(s['ville'])}</b>\n"
-            f"{s.get('brand_emoji', '⬜')} <b>{html.escape(s.get('brand', 'Enseigne inconnue'))}</b>\\n"
+            f"{medal} <b>{html.escape(s['ville'])}</b> "
+            f"{s.get('brand_emoji', '⬜')} <b>{html.escape(s.get('brand', 'Enseigne inconnue'))}</b>\n"
             f"💶 <b>{s['price']:.3f} €/L</b> • "
             f"📍 {html.escape(s['adresse'])}, {html.escape(s['cp'])} "
             f"• {html.escape(s['ville'])} • {s['distance']:.1f} km\n"
