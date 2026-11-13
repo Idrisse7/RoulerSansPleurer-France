@@ -1222,7 +1222,7 @@ async def enrich_station_brands(stations):
             selectors.append(
                 f'{element_type}(around:700,{lat:.6f},{lon:.6f})["amenity"="fuel"];'
             )
-    query = "[out:json][timeout:12];(" + "".join(selectors) + ");out center tags;"
+    query = "[out:json][timeout:12];(" + "".join(selectors) + ");out center;"
 
     payload = None
     headers = {"User-Agent": "RoulerSansPleurer/1.2 (fuel station brand matching)"}
@@ -1242,7 +1242,11 @@ async def enrich_station_brands(stations):
         except Exception as exc:
             logging.warning("Recherche enseignes Overpass échouée (%s): %s", endpoint, exc)
 
+    if payload and payload.get("remark"):
+        logging.warning("Overpass a renvoyé une erreur : %s", payload.get("remark"))
     elements = (payload or {}).get("elements", [])
+    if not elements:
+        logging.warning("Overpass n'a renvoyé aucune station-service pour l'enrichissement des enseignes.")
     candidates = []
     for element in elements:
         tags = element.get("tags") or {}
