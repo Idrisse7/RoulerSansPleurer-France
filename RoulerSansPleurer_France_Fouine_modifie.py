@@ -311,7 +311,9 @@ def update_user_identity(user, profile):
 
 
 async def get_json(session, url, params=None):
-    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
+    # Délais bornés pour éviter qu'une API publique lente bloque une interaction.
+    timeout = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
+    async with session.get(url, params=params, timeout=timeout) as r:
         r.raise_for_status()
         return await r.json()
 
@@ -1140,14 +1142,14 @@ _BRAND_CACHE_TTL = 24 * 60 * 60
 _BRAND_UNKNOWN_CACHE_TTL = 5 * 60
 
 BRAND_STYLES = [
-    (("totalenergies", "total"), "🔴", "Total"),
+    (("totalenergies", "total access", "total"), "🔴", "Total"),
     (("e leclerc", "leclerc"), "🟠", "E.Leclerc"),
     (("carrefour",), "🔵", "Carrefour"),
     (("intermarche",), "🟥", "Intermarché"),
     (("auchan",), "🟧", "Auchan"),
     (("esso",), "🟦", "Esso"),
     (("shell",), "🟡", "Shell"),
-    (("british petroleum",), "🟢", "BP"),
+    (("british petroleum", "bp france"), "🟢", "BP"),
     (("avia",), "🟣", "Avia"),
     (("systeme u", "super u", "u express", "hyper u"), "🟪", "Système U"),
     (("casino",), "🟩", "Casino"),
@@ -1214,39 +1216,45 @@ async def enrich_station_brands(stations):
     if not pending:
         return
 
-    # Cherche les points, chemins et relations OSM autour de toutes les stations.
+    # Une requête nwr par station : nwr couvre nodes, ways et relations.
     selectors = []
     for station in pending:
         lat, lon = float(station["lat"]), float(station["lon"])
-        for element_type in ("node", "way", "relation"):
-            selectors.append(
-                f'{element_type}(around:700,{lat:.6f},{lon:.6f})["amenity"="fuel"];'
-            )
-    query = "[out:json][timeout:12];(" + "".join(selectors) + ");out center;"
+        selectors.append(
+            f'nwr(around:1200,{lat:.6f},{lon:.6f})["amenity"="fuel"];'
+        )
+    query = "[out:json][timeout:20];(" + "".join(selectors) + ");out center;"
 
     payload = None
-    headers = {"User-Agent": "RoulerSansPleurer/1.2 (fuel station brand matching)"}
-    # Deux miroirs maximum : ne pas bloquer l'expérience utilisateur si Overpass est en panne.
-    for endpoint in OVERPASS_URLS[:2]:
-        try:
-            async with aiohttp.ClientSession() as session:
+    headers = {
+        "User-Agent": "RoulerSansPleurer/1.3 (station-brand matching; contact via Telegram)"
+    }
+    timeout = aiohttp.ClientTimeout(total=6, connect=2.5, sock_read=4.5)
+    # Une session partagée pour les miroirs. Le second est réellement essayé
+    # si le premier échoue, sans multiplier les connexions TCP.
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        for endpoint in OVERPASS_URLS:
+            try:
                 async with session.post(
-                    endpoint,
-                    data={"data": query},
-                    timeout=aiohttp.ClientTimeout(total=5.5, connect=2.5),
-                    headers=headers,
+                    endpoint, data={"data": query}, timeout=timeout
                 ) as response:
                     response.raise_for_status()
                     payload = await response.json(content_type=None)
-            break
-        except Exception as exc:
-            logging.warning("Recherche enseignes Overpass échouée (%s): %s", endpoint, exc)
+                if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
+                    break
+                payload = None
+            except Exception as exc:
+                logging.warning("Recherche enseignes Overpass échouée (%s): %s", endpoint, exc)
+                payload = None
 
     if payload and payload.get("remark"):
-        logging.warning("Overpass a renvoyé une erreur : %s", payload.get("remark"))
+        logging.warning("Overpass a renvoyé une remarque : %s", payload.get("remark"))
     elements = (payload or {}).get("elements", [])
-    if not elements:
-        logging.warning("Overpass n'a renvoyé aucune station-service pour l'enrichissement des enseignes.")
+    logging.info(
+        "Enrichissement enseignes : %d objets OSM reçus pour %d stations.",
+        len(elements), len(pending)
+    )
+
     candidates = []
     for element in elements:
         tags = element.get("tags") or {}
@@ -1258,13 +1266,13 @@ async def enrich_station_brands(stations):
 
         brand = identify_brand(
             tags.get("brand"),
-            tags.get("brand:en"),
             tags.get("brand:fr"),
+            tags.get("brand:en"),
             tags.get("operator"),
             tags.get("operator:short"),
             tags.get("name"),
-            tags.get("name:en"),
             tags.get("name:fr"),
+            tags.get("name:en"),
             tags.get("official_name"),
             tags.get("short_name"),
         )
@@ -1273,24 +1281,57 @@ async def enrich_station_brands(stations):
     for station in pending:
         best = None
         address = _brand_normalize(station.get("adresse", ""))
+        postcode = _brand_normalize(station.get("cp", ""))
+        city = _brand_normalize(station.get("ville", ""))
+
         for osm_lat, osm_lon, tags, brand in candidates:
+            if brand["brand"] == "Enseigne inconnue":
+                continue
+
             distance_m = haversine_km(
                 float(station["lat"]), float(station["lon"]), osm_lat, osm_lon
             ) * 1000
-            if distance_m > 500 or brand["brand"] == "Enseigne inconnue":
+            osm_street = _brand_normalize(tags.get("addr:street", ""))
+            osm_postcode = _brand_normalize(tags.get("addr:postcode", ""))
+            osm_city = _brand_normalize(
+                tags.get("addr:city") or tags.get("addr:town")
+                or tags.get("addr:village", "")
+            )
+
+            street_match = bool(osm_street and osm_street in address)
+            postcode_match = bool(postcode and osm_postcode and postcode == osm_postcode)
+            city_match = bool(city and osm_city and (city == osm_city or city in osm_city))
+            address_match = street_match or postcode_match
+
+            # Rayon élargi seulement si l'adresse concorde. Sinon, proximité stricte.
+            max_distance = 1200 if address_match else (250 if city_match else 120)
+            if distance_m > max_distance:
                 continue
 
-            # Si OSM renseigne la rue, elle aide à éviter de prendre l'enseigne voisine.
-            osm_street = _brand_normalize(tags.get("addr:street", ""))
-            street_match = bool(osm_street and osm_street in address)
-            score = distance_m - (180 if street_match else 0)
+            score = distance_m
+            if street_match:
+                score -= 500
+            if postcode_match:
+                score -= 250
+            if city_match:
+                score -= 75
             if best is None or score < best[0]:
-                best = (score, brand)
+                best = (score, brand, distance_m)
 
-        result = best[1] if best else {
-            "brand": "Enseigne inconnue",
-            "brand_emoji": "⬜",
-        }
+        if best:
+            result = best[1]
+            logging.info(
+                "Enseigne associée : %s — %s (%.0f m)",
+                station.get("ville", "?"), result["brand"], best[2]
+            )
+        else:
+            result = {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
+            logging.info(
+                "Enseigne non trouvée : %s, %s, %s (%.6f, %.6f)",
+                station.get("ville", "?"), station.get("adresse", ""),
+                station.get("cp", ""), float(station["lat"]), float(station["lon"])
+            )
+
         _BRAND_CACHE[_station_cache_key(station)] = (now, result)
         station.update(result)
 
@@ -1376,9 +1417,9 @@ async def prices_for_user(p, sort_by="price"):
     # retarder l'affichage des prix ni bloquer les boutons Telegram.
     selected = results[:TOP_N]
     try:
-        await asyncio.wait_for(enrich_station_brands(selected), timeout=7.0)
-    except (asyncio.TimeoutError, Exception) as exc:
-        logging.debug("Identification des enseignes ignorée (délai dépassé/erreur) : %s", exc)
+        await asyncio.wait_for(enrich_station_brands(selected), timeout=12.5)
+    except Exception as exc:
+        logging.warning("Identification des enseignes ignorée (délai dépassé/erreur) : %s", exc)
         for station in selected:
             station.setdefault("brand", "Enseigne inconnue")
             station.setdefault("brand_emoji", "⬜")
@@ -1451,11 +1492,13 @@ async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("❌ Configure d'abord ta localisation avec /start.")
         return MAIN_MENU
     try:
-        stations = await prices_for_user(p, sort_by="distance")
+        stations, shortages = await asyncio.gather(
+            prices_for_user(p, sort_by="distance"),
+            shortages_for_user(p),
+        )
     except Exception:
         await q.edit_message_text("❌ Impossible de récupérer les stations actuellement.")
         return MAIN_MENU
-    shortages = await shortages_for_user(p)
     await q.edit_message_text(
         format_prices(p, stations, sort_by="distance", shortages=shortages),
         parse_mode=ParseMode.HTML,
@@ -1522,15 +1565,17 @@ async def show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
 
     try:
-        stations = await prices_for_user(p)
-    except Exception as e:
+        stations, shortages = await asyncio.gather(
+            prices_for_user(p),
+            shortages_for_user(p),
+        )
+    except Exception:
         await q.edit_message_text(
-            "❌ Impossible de récupérer les prix actuellement.\n"
+            "❌ Impossible de récupérer les prix actuellement.\\n"
             "Réessaie dans quelques secondes."
         )
         return MAIN_MENU
 
-    shortages = await shortages_for_user(p)
     await q.edit_message_text(
         format_prices(p, stations, shortages=shortages),
         parse_mode=ParseMode.HTML,
