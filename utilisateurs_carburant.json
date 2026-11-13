@@ -42,7 +42,9 @@
     "quiet_start": "20:00",
     "quiet_end": "07:00",
     "quiet_timezone": "Europe/Paris",
-    "pending_notifications": []
+    "pending_notifications": [],
+    "update_pin_message_id": 9714,
+    "update_pin_expires_at": 1794678779.106791
   },
   "8615737858": {
     "chat_id": 8615737858,
