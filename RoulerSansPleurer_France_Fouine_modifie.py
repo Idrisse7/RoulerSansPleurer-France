@@ -1134,44 +1134,44 @@ def _clean_brand(tags):
     return None
 
 
+_BRAND_FAIL_UNTIL = 0.0   # après un échec Overpass, on laisse tranquille jusqu'à cette heure
+_BRAND_INFLIGHT = set()    # ids déjà en cours de recherche
+BRAND_WAIT_SECONDS = 4.0   # attente MAX côté bouton ; le cron de 10 min réchauffe le cache
+OVERPASS_HEADERS = {"User-Agent": "RoulerSansPleurerBot/1.0 (telegram fuel bot)"}
+
+
 async def _overpass_query(session, query):
+    """Essaie chaque miroir Overpass. Tourne en arrière-plan : ne bloque aucun bouton."""
     for url in OVERPASS_URLS:
         try:
             async with session.post(
-                url, data={"data": query}, timeout=aiohttp.ClientTimeout(total=20)
+                url, data={"data": query}, headers=OVERPASS_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=12),
             ) as r:
-                r.raise_for_status()
-                return await r.json()
+                if r.status != 200:
+                    print(f"[ENSEIGNE] {url} -> HTTP {r.status}")
+                    continue
+                return await r.json(content_type=None)
         except Exception as exc:
             print(f"[ENSEIGNE] {url} indisponible : {exc!r}")
     return None
 
 
-async def attach_brands(stations):
-    """Ajoute la clé 'enseigne' (str ou None) à chaque station. Ne lève jamais d'erreur."""
-    now = time.time()
-    todo = []
-    for s in stations:
-        s["enseigne"] = None
-        cached = _BRAND_CACHE.get(s.get("id"))
-        if cached and now - cached[1] < BRAND_CACHE_TTL:
-            s["enseigne"] = cached[0]
-        elif s.get("lat") is not None and s.get("lon") is not None:
-            todo.append(s)
-    if not todo:
-        return stations
-
+async def _fetch_brands(todo):
+    """Tâche de fond : interroge OpenStreetMap et remplit le cache."""
+    global _BRAND_FAIL_UNTIL
+    ids = [s.get("id") for s in todo]
     try:
         around = "".join(
             f'nwr["amenity"="fuel"](around:{BRAND_MATCH_RADIUS_M},{float(s["lat"])},{float(s["lon"])});'
             for s in todo
         )
-        query = f"[out:json][timeout:20];({around});out center tags;"
+        query = f"[out:json][timeout:10];({around});out center tags;"
         async with aiohttp.ClientSession() as session:
             data = await _overpass_query(session, query)
         if data is None:
-            return stations  # échec réseau : on n'écrit rien en cache, on réessaiera
-
+            _BRAND_FAIL_UNTIL = time.time() + 120
+            return
         candidates = []
         for el in data.get("elements", []):
             lat = el.get("lat", (el.get("center") or {}).get("lat"))
@@ -1179,7 +1179,7 @@ async def attach_brands(stations):
             brand = _clean_brand(el.get("tags") or {})
             if lat is not None and lon is not None and brand:
                 candidates.append((float(lat), float(lon), brand))
-
+        now = time.time()
         for s in todo:
             best, best_d = None, BRAND_MATCH_RADIUS_M / 1000.0
             for lat, lon, brand in candidates:
@@ -1191,6 +1191,36 @@ async def attach_brands(stations):
                 _BRAND_CACHE[s["id"]] = (best, now)
         if len(_BRAND_CACHE) > 20000:
             _BRAND_CACHE.clear()
+    except Exception as exc:
+        print("[ENSEIGNE] erreur :", exc)
+        _BRAND_FAIL_UNTIL = time.time() + 120
+    finally:
+        for i in ids:
+            _BRAND_INFLIGHT.discard(i)
+
+
+async def attach_brands(stations):
+    """Ajoute 'enseigne' à chaque station SANS jamais bloquer : cache d'abord, puis
+    recherche en arrière-plan (attente max BRAND_WAIT_SECONDS). Ne lève jamais d'erreur."""
+    now = time.time()
+    todo = []
+    for s in stations:
+        s["enseigne"] = None
+        cached = _BRAND_CACHE.get(s.get("id"))
+        if cached and now - cached[1] < BRAND_CACHE_TTL:
+            s["enseigne"] = cached[0]
+        elif (s.get("lat") is not None and s.get("lon") is not None
+              and s.get("id") not in _BRAND_INFLIGHT):
+            todo.append(s)
+    if not todo or now < _BRAND_FAIL_UNTIL:
+        return stations
+    try:
+        for s in todo:
+            _BRAND_INFLIGHT.add(s.get("id"))
+        task = asyncio.create_task(_fetch_brands(todo))
+        await asyncio.wait_for(asyncio.shield(task), timeout=BRAND_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        pass  # la tâche continue en fond ; l'enseigne apparaîtra au prochain affichage
     except Exception as exc:
         print("[ENSEIGNE] erreur :", exc)
     return stations
@@ -2238,6 +2268,45 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
 
+async def test_enseigne(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/testenseigne (équipe uniquement) : montre si OpenStreetMap répond depuis le serveur du bot."""
+    chat_id = update.effective_chat.id
+    if not is_staff(chat_id):
+        return
+    p = user_profile(chat_id)
+    if p.get("lat") is None:
+        await update.message.reply_text("Configure d'abord ta localisation avec /start.")
+        return
+    query = (
+        '[out:json][timeout:10];'
+        f'nwr["amenity"="fuel"](around:3000,{float(p["lat"])},{float(p["lon"])});'
+        'out center tags;'
+    )
+    lines = ["🔎 <b>Test enseignes (OpenStreetMap)</b>\n"]
+    async with aiohttp.ClientSession() as session:
+        for url in OVERPASS_URLS:
+            host = html.escape(url.split("/")[2])
+            t0 = time.time()
+            try:
+                async with session.post(
+                    url, data={"data": query}, headers=OVERPASS_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    if r.status != 200:
+                        lines.append(f"❌ {host} : HTTP {r.status}")
+                        continue
+                    data = await r.json(content_type=None)
+                els = data.get("elements", [])
+                names = [b for b in (_clean_brand(e.get("tags") or {}) for e in els) if b]
+                lines.append(
+                    f"✅ {host} : {len(els)} station(s), {time.time() - t0:.1f}s\n"
+                    + ", ".join(html.escape(n) for n in names[:8])
+                )
+            except Exception as exc:
+                lines.append(f"❌ {host} : {html.escape(repr(exc)[:120])}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 async def post_init(application: Application):
     load_users()
     # Restaure les retraits d'épingles après un redémarrage du bot.
@@ -2349,6 +2418,7 @@ def build_application():
     # Administration : indépendante de l'état de la conversation principale.
     app.add_handler(CallbackQueryHandler(adm_router, pattern=r"^ADM:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=1)
+    app.add_handler(CommandHandler("testenseigne", test_enseigne))
     app.add_handler(conv)
     app.job_queue.run_repeating(price_check_job, interval=REFRESH_SECONDS, first=10)
     return app
