@@ -1325,30 +1325,99 @@ def format_prices(p, stations, sort_by="price", shortages=None):
 
 
 async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Demande un GPS ponctuel ; les coordonnées restent uniquement en mémoire."""
     q = update.callback_query
-    await q.answer("Recherche des stations les plus proches…")
-    p = user_profile(q.message.chat.id)
-    if p.get("sort_mode") != "distance":
-        p["sort_mode"] = "distance"
-        reset_price_signature(p)
-    save_users()
-    if p["lat"] is None:
-        await q.edit_message_text("❌ Configure d'abord ta localisation avec /start.")
-        return MAIN_MENU
-    try:
-        # Les prix et les ruptures sont indépendants : on les récupère en parallèle.
-        stations, shortages = await asyncio.gather(
-            prices_for_user(p, sort_by="distance"),
-            shortages_for_user(p),
+    await q.answer()
+    chat_id = q.message.chat.id
+    p = user_profile(chat_id)
+
+    # Telegram n'autorise request_location que sur un clavier de réponse,
+    # pas sur un bouton inline. La demande est donc envoyée comme message.
+    context.user_data["awaiting_nearest_gps_at"] = time.time()
+    location_keyboard = ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📍 Envoyer ma position actuelle", request_location=True)],
+            [KeyboardButton("❌ Annuler")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await q.message.reply_text(
+        "📍 <b>Partage ta position actuelle</b> pour rechercher les stations "
+        "les plus proches.\n\n"
+        "Ta position servira uniquement à cette recherche et ne remplacera "
+        "pas ta localisation habituelle.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=location_keyboard,
+    )
+    return MAIN_MENU
+
+
+async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recherche avec un GPS temporaire, sans modifier ni sauvegarder le profil."""
+    pending_at = context.user_data.get("awaiting_nearest_gps_at")
+    if not pending_at:
+        await update.message.reply_text(
+            "ℹ️ Pour utiliser ton GPS ponctuellement, appuie d'abord sur « 📍 Plus proche ».",
+            reply_markup=main_keyboard(update.effective_chat.id),
         )
-    except Exception:
-        await q.edit_message_text("❌ Impossible de récupérer les stations actuellement.")
         return MAIN_MENU
-    await q.edit_message_text(
-        format_prices(p, stations, sort_by="distance", shortages=shortages),
+
+    context.user_data.pop("awaiting_nearest_gps_at", None)
+    if time.time() - pending_at > 300:
+        await update.message.reply_text(
+            "⌛ Demande expirée. Appuie à nouveau sur « 📍 Plus proche ».",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return MAIN_MENU
+
+    loc = update.message.location
+    if not (-90 <= loc.latitude <= 90 and -180 <= loc.longitude <= 180):
+        await update.message.reply_text(
+            "❌ Position GPS invalide. Réessaie avec « 📍 Plus proche ».",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return MAIN_MENU
+
+    p = user_profile(update.effective_chat.id)
+    # Copie locale : aucune coordonnée GPS ponctuelle n'est écrite dans users.
+    temp_p = dict(p)
+    temp_p["lat"] = float(loc.latitude)
+    temp_p["lon"] = float(loc.longitude)
+    temp_p["latitude"] = float(loc.latitude)
+    temp_p["longitude"] = float(loc.longitude)
+    temp_p["city"] = "Position actuelle"
+
+    await update.message.reply_text(
+        "🔎 Recherche des stations autour de ta position…",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    try:
+        stations = await prices_for_user(temp_p, sort_by="distance")
+        # Les ruptures ne sont pas recalculées ici : elles dépendent du profil
+        # géographique habituel et ne sont pas nécessaires au classement GPS.
+        result_text = format_prices(temp_p, stations, sort_by="distance", shortages=None)
+    except Exception:
+        await update.message.reply_text(
+            "❌ Impossible de récupérer les stations actuellement. Réessaie plus tard.",
+            reply_markup=main_keyboard(update.effective_chat.id),
+        )
+        return MAIN_MENU
+
+    await update.message.reply_text(
+        result_text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=main_keyboard(q.message.chat.id),
+        reply_markup=main_keyboard(update.effective_chat.id),
+    )
+    return MAIN_MENU
+
+
+async def cancel_nearest_gps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting_nearest_gps_at", None)
+    await update.message.reply_text(
+        "Recherche GPS annulée.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     return MAIN_MENU
 
@@ -2292,6 +2361,8 @@ def build_application():
             ],
             MAIN_MENU: [
                 MessageHandler(filters.Regex("^🏠 Accueil$"), start),
+                MessageHandler(filters.LOCATION, nearest_gps_location),
+                MessageHandler(filters.Regex("^❌ Annuler$"), cancel_nearest_gps),
             ] + menu_handlers(),
         },
         fallbacks=[CommandHandler("cancel", cancel)],
