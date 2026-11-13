@@ -1133,7 +1133,8 @@ async def station_brand(session, station_id):
             payload = await response.json(content_type=None)
         brand = payload.get("Brand") or payload.get("brand") or {}
         name = brand.get("short_name") or brand.get("name") or payload.get("brand_name") or ""
-        name = str(name).strip()
+        name = str(name or "").replace("\\r\\n", " ").replace("\\n", " ").replace("\\r", " ")
+        name = re.sub(r"\s+", " ", name).strip()
         _BRAND_CACHE[sid] = (now, name)
         return name
     except Exception as exc:
@@ -1305,7 +1306,7 @@ def format_prices(p, stations, sort_by="price", shortages=None):
         text += (
             f"{medal} <b>{html.escape(s['ville'])}</b>"
             + format_brand_badge(s.get("enseigne"))
-            + "\\n"
+            + "\n"
             f"💶 <b>{s['price']:.3f} €/L</b> • "
             f"📍 {html.escape(s['adresse'])}, {html.escape(s['cp'])} "
             f"• {html.escape(s['ville'])} • {s['distance']:.1f} km\n"
