@@ -1223,13 +1223,13 @@ async def enrich_station_brands(stations):
         selectors.append(
             f'nwr(around:1200,{lat:.6f},{lon:.6f})["amenity"="fuel"];'
         )
-    query = "[out:json][timeout:20];(" + "".join(selectors) + ");out center;"
+    query = "[out:json][timeout:25];(" + "".join(selectors) + ");out center;"
 
     payload = None
     headers = {
         "User-Agent": "RoulerSansPleurer/1.3 (station-brand matching; contact via Telegram)"
     }
-    timeout = aiohttp.ClientTimeout(total=6, connect=2.5, sock_read=4.5)
+    timeout = aiohttp.ClientTimeout(total=11, connect=4, sock_read=8)
     # Une session partagée pour les miroirs. Le second est réellement essayé
     # si le premier échoue, sans multiplier les connexions TCP.
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
@@ -1303,27 +1303,57 @@ async def enrich_station_brands(stations):
             city_match = bool(city and osm_city and (city == osm_city or city in osm_city))
             address_match = street_match or postcode_match
 
-            # Rayon élargi seulement si l'adresse concorde. Sinon, proximité stricte.
-            max_distance = 1200 if address_match else (250 if city_match else 120)
+            # Les coordonnées officielles peuvent pointer vers l'entrée ou le
+            # centre administratif du site, tandis qu'OSM place le point au
+            # centre du terrain. Ne pas exiger une adresse OSM (souvent absente).
+            # En revanche, sans concordance d'adresse, on limite le rayon et on
+            # refusera les cas ambigus entre plusieurs enseignes voisines.
+            max_distance = 1200 if address_match else (700 if city_match else 500)
             if distance_m > max_distance:
                 continue
 
             score = distance_m
             if street_match:
-                score -= 500
+                score -= 650
             if postcode_match:
-                score -= 250
+                score -= 300
             if city_match:
-                score -= 75
+                score -= 100
             if best is None or score < best[0]:
-                best = (score, brand, distance_m)
+                best = (score, brand, distance_m, tags)
 
         if best:
-            result = best[1]
-            logging.info(
-                "Enseigne associée : %s — %s (%.0f m)",
-                station.get("ville", "?"), result["brand"], best[2]
-            )
+            # Si plusieurs enseignes différentes sont à des distances presque
+            # identiques et qu'aucune adresse ne confirme le rapprochement,
+            # ne pas attribuer une marque au hasard.
+            alternatives = []
+            for osm_lat, osm_lon, tags, brand in candidates:
+                if brand["brand"] == "Enseigne inconnue":
+                    continue
+                d = haversine_km(float(station["lat"]), float(station["lon"]), osm_lat, osm_lon) * 1000
+                osm_street = _brand_normalize(tags.get("addr:street", ""))
+                osm_postcode = _brand_normalize(tags.get("addr:postcode", ""))
+                street_ok = bool(osm_street and osm_street in address)
+                postcode_ok = bool(postcode and osm_postcode and postcode == osm_postcode)
+                city_ok = bool(city and _brand_normalize(tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village", "")) == city)
+                limit = 1200 if (street_ok or postcode_ok) else (700 if city_ok else 500)
+                if d <= limit:
+                    alternatives.append((d, brand["brand"], street_ok or postcode_ok))
+            alternatives.sort(key=lambda x: x[0])
+            distinct = {b for _, b, _ in alternatives[:3]}
+            confirmed_by_address = best[3].get("addr:street") or best[3].get("addr:postcode")
+            if len(distinct) > 1 and not confirmed_by_address:
+                result = {"brand": "Enseigne à confirmer", "brand_emoji": "❔"}
+                logging.warning(
+                    "Rapprochement ambigu pour %s : %s",
+                    station.get("ville", "?"), alternatives[:3]
+                )
+            else:
+                result = best[1]
+                logging.info(
+                    "Enseigne associée : %s — %s (%.0f m)",
+                    station.get("ville", "?"), result["brand"], best[2]
+                )
         else:
             result = {"brand": "Enseigne inconnue", "brand_emoji": "⬜"}
             logging.info(
