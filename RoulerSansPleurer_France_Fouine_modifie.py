@@ -1124,7 +1124,7 @@ async def station_brand(session, station_id):
     try:
         async with session.get(
             f"{BRAND_API_BASE}/station/{sid}",
-            timeout=aiohttp.ClientTimeout(total=8),
+            timeout=aiohttp.ClientTimeout(total=2.0, connect=1.0, sock_read=1.5),
         ) as response:
             if response.status == 404:
                 _BRAND_CACHE[sid] = (now, "")
@@ -1144,9 +1144,10 @@ async def station_brand(session, station_id):
 
 async def enrich_station_brands(stations):
     """Enrichit les stations affichées en parallèle sans bloquer les callbacks."""
-    connector = aiohttp.TCPConnector(limit=8)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        semaphore = asyncio.Semaphore(5)
+    connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=2.5, connect=1.0, sock_read=1.5)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        semaphore = asyncio.Semaphore(15)
 
         async def enrich(station):
             async with semaphore:
@@ -1335,11 +1336,14 @@ async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("❌ Configure d'abord ta localisation avec /start.")
         return MAIN_MENU
     try:
-        stations = await prices_for_user(p, sort_by="distance")
+        # Les prix et les ruptures sont indépendants : on les récupère en parallèle.
+        stations, shortages = await asyncio.gather(
+            prices_for_user(p, sort_by="distance"),
+            shortages_for_user(p),
+        )
     except Exception:
         await q.edit_message_text("❌ Impossible de récupérer les stations actuellement.")
         return MAIN_MENU
-    shortages = await shortages_for_user(p)
     await q.edit_message_text(
         format_prices(p, stations, sort_by="distance", shortages=shortages),
         parse_mode=ParseMode.HTML,
