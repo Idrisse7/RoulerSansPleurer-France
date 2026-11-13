@@ -19,8 +19,8 @@
     "fuel": "Gazole",
     "sort_by": "price",
     "last_signature": null,
-    "sort_mode": "distance",
-    "mode_fouine": true,
+    "sort_mode": "price",
+    "mode_fouine": false,
     "joined_at": null,
     "saved": [
       {
