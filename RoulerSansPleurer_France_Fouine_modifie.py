@@ -1324,6 +1324,31 @@ def format_prices(p, stations, sort_by="price", shortages=None):
     return text
 
 
+async def _delete_nearest_ui_message(bot, chat_id, message_id):
+    """Supprime uniquement un message temporaire du parcours « Plus proche ».
+
+    Cette fonction ne doit jamais recevoir l'identifiant d'une alerte de prix,
+    d'un message Fouine, d'une annonce ou d'une notification système.
+    """
+    if not chat_id or not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        # Message déjà supprimé, trop ancien ou droits Telegram insuffisants : on ignore.
+        logging.getLogger(__name__).debug("Nettoyage Telegram ignoré: %s", exc)
+
+
+async def _expire_nearest_prompt(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data or {}
+    chat_id = data.get("chat_id")
+    message_id = data.get("message_id")
+    try:
+        await _delete_nearest_ui_message(context.bot, chat_id, message_id)
+    except Exception:
+        pass
+
+
 async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Demande un GPS ponctuel ; les coordonnées restent uniquement en mémoire."""
     q = update.callback_query
@@ -1342,7 +1367,7 @@ async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True,
         one_time_keyboard=True,
     )
-    await q.message.reply_text(
+    prompt = await q.message.reply_text(
         "📍 <b>Partage ta position actuelle</b> pour rechercher les stations "
         "les plus proches.\n\n"
         "Ta position servira uniquement à cette recherche et ne remplacera "
@@ -1350,6 +1375,15 @@ async def show_nearest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         reply_markup=location_keyboard,
     )
+    context.user_data["nearest_gps_prompt_message_id"] = prompt.message_id
+    # Si l'utilisateur ne répond pas, le clavier de demande ne reste pas éternellement.
+    if context.job_queue:
+        context.job_queue.run_once(
+            _expire_nearest_prompt,
+            300,
+            data={"chat_id": chat_id, "message_id": prompt.message_id},
+            name=f"nearest-gps-expire-{chat_id}-{prompt.message_id}",
+        )
     return MAIN_MENU
 
 
@@ -1364,12 +1398,18 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
         return MAIN_MENU
 
     context.user_data.pop("awaiting_nearest_gps_at", None)
+    prompt_message_id = context.user_data.pop("nearest_gps_prompt_message_id", None)
     if time.time() - pending_at > 300:
+        await _delete_nearest_ui_message(context.bot, update.effective_chat.id, prompt_message_id)
         await update.message.reply_text(
             "⌛ Demande expirée. Appuie à nouveau sur « 📍 Plus proche ».",
             reply_markup=ReplyKeyboardRemove(),
         )
         return MAIN_MENU
+
+    # On retire uniquement le message du bot qui demandait le GPS.
+    # Le message de position envoyé par l'utilisateur reste visible et n'est pas touché.
+    await _delete_nearest_ui_message(context.bot, update.effective_chat.id, prompt_message_id)
 
     loc = update.message.location
     if not (-90 <= loc.latitude <= 90 and -180 <= loc.longitude <= 180):
@@ -1388,7 +1428,7 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
     temp_p["longitude"] = float(loc.longitude)
     temp_p["city"] = "Position actuelle"
 
-    await update.message.reply_text(
+    searching_message = await update.message.reply_text(
         "🔎 Recherche des stations autour de ta position…",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -1398,23 +1438,34 @@ async def nearest_gps_location(update: Update, context: ContextTypes.DEFAULT_TYP
         # géographique habituel et ne sont pas nécessaires au classement GPS.
         result_text = format_prices(temp_p, stations, sort_by="distance", shortages=None)
     except Exception:
+        await _delete_nearest_ui_message(context.bot, update.effective_chat.id, searching_message.message_id)
         await update.message.reply_text(
             "❌ Impossible de récupérer les stations actuellement. Réessaie plus tard.",
             reply_markup=main_keyboard(update.effective_chat.id),
         )
         return MAIN_MENU
 
-    await update.message.reply_text(
+    # On conserve le résultat précédent tant que le nouveau n'a pas été envoyé.
+    result_message = await update.message.reply_text(
         result_text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
         reply_markup=main_keyboard(update.effective_chat.id),
     )
+    await _delete_nearest_ui_message(context.bot, update.effective_chat.id, searching_message.message_id)
+    # Seul l'ancien résultat GPS « Plus proche » est remplacé ici.
+    # Aucun message d'alerte de prix / Fouine n'est stocké dans cette clé.
+    previous_result_id = context.user_data.get("nearest_result_message_id")
+    if previous_result_id and previous_result_id != result_message.message_id:
+        await _delete_nearest_ui_message(context.bot, update.effective_chat.id, previous_result_id)
+    context.user_data["nearest_result_message_id"] = result_message.message_id
     return MAIN_MENU
 
 
 async def cancel_nearest_gps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("awaiting_nearest_gps_at", None)
+    prompt_message_id = context.user_data.pop("nearest_gps_prompt_message_id", None)
+    await _delete_nearest_ui_message(context.bot, update.effective_chat.id, prompt_message_id)
     await update.message.reply_text(
         "Recherche GPS annulée.",
         reply_markup=ReplyKeyboardRemove(),
@@ -2250,6 +2301,9 @@ async def price_check_job(context: ContextTypes.DEFAULT_TYPE):
                         queue.append(alert_text)
                         profile["pending_notifications"] = queue[-20:]
                     else:
+                        # IMPORTANT : les alertes de prix et les messages Fouine
+                        # sont des notifications utiles. Le nettoyage GPS ne les
+                        # référence jamais et ne doit jamais les supprimer.
                         await context.bot.send_message(
                             chat_id=int(chat_id), text=alert_text,
                             parse_mode=ParseMode.HTML,
