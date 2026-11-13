@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -438,12 +439,16 @@ async def shortages_for_user(p, show=3):
         for rec in data.get("results", []):
             f = rec.get("fields", rec)
             geom = f.get("geom")
+            lat = lon = None
             try:
                 lon, lat = float(geom[0]), float(geom[1])
                 dist = haversine_km(p["lat"], p["lon"], lat, lon)
             except Exception:
+                lat = lon = None
                 dist = None
             stations.append({
+                "lat": lat,
+                "lon": lon,
                 "ville": f.get("ville", ""),
                 "adresse": f.get("adresse", ""),
                 "cp": f.get("cp", ""),
@@ -457,7 +462,9 @@ async def shortages_for_user(p, show=3):
                 ),
             })
         stations.sort(key=lambda s: (s["distance"] is None, s["distance"] or 0))
-        return {"total": data.get("total_count", len(stations)), "stations": stations[:show]}
+        stations = stations[:show]
+        await attach_brands(stations)
+        return {"total": data.get("total_count", len(stations)), "stations": stations}
     except Exception as exc:
         print("[RUPTURES] indisponible :", exc)
         return None
@@ -473,8 +480,9 @@ def shortage_block(p, shortages):
     for s in shortages["stations"]:
         dist = f" • {s['distance']:.1f} km" if s["distance"] is not None else ""
         kind = "" if s["kind"] == "rupture" else f" ({s['kind']})"
+        brand = f" ({html.escape(s['brand'])})" if s.get("brand") else ""
         text += (
-            f"⛔ {html.escape(s['ville'])} — {html.escape(s['adresse'])}"
+            f"⛔ {html.escape(s['ville'])}{brand} — {html.escape(s['adresse'])}"
             f"{dist}{kind}\n"
         )
     return text + "\n"
@@ -1107,6 +1115,133 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
+# ───────────────── Enseignes des stations (OpenStreetMap) ─────────────────
+# L'API officielle des prix ne fournit ni le nom ni la marque des stations.
+# On les récupère via OpenStreetMap (Overpass), en bonus : si c'est indisponible,
+# le bot fonctionne exactement comme avant (aucune enseigne affichée).
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
+BRAND_MATCH_M = 150                  # rayon de rapprochement station <-> OSM (mètres)
+BRAND_CACHE_TTL = 7 * 24 * 3600      # enseigne trouvée : gardée 7 jours
+BRAND_MISS_TTL = 24 * 3600           # rien trouvé : on réessaie après 1 jour
+_BRAND_CACHE = {}                    # (lat, lon) -> (horodatage, "🔴 TotalEnergies")
+_overpass_down_until = 0.0
+
+# (motif sur le nom normalisé, nom affiché, émoji)
+BRANDS = [
+    (r"\btotal", "TotalEnergies", "🔴"),
+    (r"\besso\b", "Esso", "🔵"),
+    (r"\bshell\b", "Shell", "🟡"),
+    (r"\bbp\b", "BP", "🟢"),
+    (r"\bavia\b", "Avia", "🔷"),
+    (r"\bagip\b|\beni\b", "Eni / Agip", "🐕"),
+    (r"\bdyneff\b", "Dyneff", "🟠"),
+    (r"\bvito\b", "Vito", "⚪"),
+    (r"\b(?:super|hyper) u\b|\bu express\b|\bsysteme u\b|\butile\b|\bstation u\b|^u$", "Super U", "🛒"),
+    (r"leclerc", "E.Leclerc", "🛒"),
+    (r"carrefour", "Carrefour", "🛒"),
+    (r"intermarche", "Intermarché", "🛒"),
+    (r"auchan", "Auchan", "🛒"),
+    (r"\bcasino\b", "Casino", "🛒"),
+    (r"\bcora\b", "Cora", "🛒"),
+    (r"\bnetto\b", "Netto", "🛒"),
+    (r"colruyt", "Colruyt", "🛒"),
+    (r"leader price", "Leader Price", "🛒"),
+    (r"\bmonoprix\b", "Monoprix", "🛒"),
+    (r"\bmatch\b", "Match", "🛒"),
+    (r"\belan\b", "Elan", "⛽"),
+    (r"\bq8\b", "Q8", "🔵"),
+    (r"texaco", "Texaco", "🔴"),
+    (r"\bgulf\b", "Gulf", "🟠"),
+    (r"ecomarche", "Ecomarché", "🛒"),
+    (r"bricomarche", "Bricomarché", "🛒"),
+    (r"\bbi1\b", "Bi1", "🛒"),
+    (r"\batac\b", "Atac", "🛒"),
+    (r"\bspar\b", "Spar", "🛒"),
+    (r"\blidl\b", "Lidl", "🛒"),
+    (r"\baldi\b", "Aldi", "🛒"),
+]
+
+
+def _norm_brand(value):
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def brand_from_tags(tags):
+    """Retourne par ex. '🔴 TotalEnergies' à partir des tags OpenStreetMap, ou ''."""
+    for key in ("brand", "name", "operator"):
+        raw = tags.get(key)
+        if not raw:
+            continue
+        norm = _norm_brand(raw)
+        for pattern, label, emoji in BRANDS:
+            if re.search(pattern, norm):
+                return f"{emoji} {label}"
+    raw = tags.get("brand") or tags.get("name") or tags.get("operator")
+    return f"⛽ {str(raw).strip()[:40]}" if raw else ""
+
+
+async def attach_brands(stations):
+    """Ajoute s['brand'] à chaque station (lat/lon requis). Ne lève jamais d'exception."""
+    global _overpass_down_until
+    try:
+        now = time.time()
+        todo = []
+        for s in stations:
+            if s.get("lat") is None or s.get("lon") is None:
+                continue
+            key = (round(s["lat"], 5), round(s["lon"], 5))
+            hit = _BRAND_CACHE.get(key)
+            if (not hit or now - hit[0] >= BRAND_CACHE_TTL) and key not in todo:
+                todo.append(key)
+
+        if todo and now >= _overpass_down_until:
+            parts = "".join(
+                f'nwr["amenity"="fuel"](around:{BRAND_MATCH_M},{la},{lo});' for la, lo in todo
+            )
+            query = f"[out:json][timeout:15];({parts});out center tags;"
+            elements = None
+            async with aiohttp.ClientSession(headers={"User-Agent": "RoulerSansPleurerBot/1.0"}) as session:
+                for url in OVERPASS_URLS:
+                    try:
+                        async with session.post(
+                            url, data={"data": query}, timeout=aiohttp.ClientTimeout(total=12)
+                        ) as r:
+                            if r.status != 200:
+                                continue
+                            elements = (await r.json(content_type=None)).get("elements", [])
+                            break
+                    except Exception as exc:
+                        print("[ENSEIGNES] Overpass indisponible :", exc)
+            if elements is None:
+                _overpass_down_until = now + 300  # pause 5 min, sans gêner le bot
+            else:
+                for key in todo:
+                    best = None
+                    for el in elements:
+                        c = el.get("center") or el
+                        try:
+                            d = haversine_km(key[0], key[1], float(c["lat"]), float(c["lon"])) * 1000
+                        except Exception:
+                            continue
+                        if d <= BRAND_MATCH_M and (best is None or d < best[0]):
+                            best = (d, el.get("tags") or {})
+                    brand = brand_from_tags(best[1]) if best else ""
+                    stamp = now if brand else now - (BRAND_CACHE_TTL - BRAND_MISS_TTL)
+                    _BRAND_CACHE[key] = (stamp, brand)
+
+        for s in stations:
+            hit = None
+            if s.get("lat") is not None and s.get("lon") is not None:
+                hit = _BRAND_CACHE.get((round(s["lat"], 5), round(s["lon"], 5)))
+            s["brand"] = hit[1] if hit else ""
+    except Exception as exc:
+        print("[ENSEIGNES] indisponible :", exc)
+
+
 async def prices_for_user(p, sort_by="price"):
     fuel_field = FUEL_FIELD[p["fuel"]]
 
@@ -1183,7 +1318,9 @@ async def prices_for_user(p, sort_by="price"):
         results.sort(key=lambda x: (x["distance"], x["price"]))
     else:
         results.sort(key=lambda x: (x["price"], x["distance"]))
-    return results[:TOP_N]
+    top = results[:TOP_N]
+    await attach_brands(top)
+    return top
 
 
 def maps_url(station):
@@ -1220,7 +1357,9 @@ def format_prices(p, stations, sort_by="price", shortages=None):
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         medal = medals.get(i, "🔷")
         text += (
-            f"{medal} <b>{html.escape(s['ville'])}</b>\n"
+            f"{medal} <b>{html.escape(s['ville'])}</b>"
+            + (f" — <b>{html.escape(s['brand'])}</b>" if s.get("brand") else "")
+            + "\n"
             f"💶 <b>{s['price']:.3f} €/L</b> • "
             f"📍 {html.escape(s['adresse'])}, {html.escape(s['cp'])} "
             f"• {html.escape(s['ville'])} • {s['distance']:.1f} km\n"
@@ -1288,8 +1427,9 @@ async def show_ruptures(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for st in sh["stations"]:
             dist = f" • {st['distance']:.1f} km" if st["distance"] is not None else ""
             kind = "" if st["kind"] == "rupture" else f" ({st['kind']})"
+            brand = f" — <b>{html.escape(st['brand'])}</b>" if st.get("brand") else ""
             text += (
-                f"⛔ <b>{html.escape(st['ville'])}</b>{dist}{kind}\n"
+                f"⛔ <b>{html.escape(st['ville'])}</b>{brand}{dist}{kind}\n"
                 f"📍 {html.escape(st['adresse'])}, {html.escape(st['cp'])}\n"
             )
             if st["others"]:
