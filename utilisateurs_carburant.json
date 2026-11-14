@@ -163,7 +163,7 @@
     "radius": 10,
     "fuel": "SP95-E10",
     "sort_by": "price",
-    "last_signature": "price|38240006:1.909|38400006:1.919|38240003:1.924|38170004:1.928|38120001:1.930|R:3",
+    "last_signature": "price|38700003:1.909|38240006:1.909|38400006:1.919|38240003:1.924|38170004:1.928|R:3",
     "sort_mode": "price",
     "mode_fouine": false
   },
@@ -236,7 +236,7 @@
     "radius": 10,
     "fuel": "SP95-E10",
     "sort_by": "price",
-    "last_signature": "price|38240006:1.909|38400006:1.919|38240003:1.924|38170004:1.928|38120001:1.930|R:2",
+    "last_signature": "price|38700003:1.909|38240006:1.909|38400006:1.919|38240003:1.924|38170004:1.928|R:2",
     "sort_mode": "price",
     "mode_fouine": false,
     "update_pin_message_id": 9724,
