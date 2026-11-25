@@ -32,7 +32,7 @@
         "department": "Isère",
         "region": "Auvergne-Rhône-Alpes",
         "id": "1",
-        "last_signature": "price|38170004:2.011|38360006:2.011|38700003:2.013|38240006:2.013|38600003:2.026"
+        "last_signature": "price|38600003:1.980|38170004:2.011|38360006:2.011|38700003:2.013|38240006:2.013"
       }
     ],
     "role": "user",
@@ -318,7 +318,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38340012:1.984|38340013:1.984|38340006:1.989|38170004:2.011|38360006:2.011",
+    "last_signature": "price|38600003:1.980|38340012:1.984|38340013:1.984|38340006:1.989|38170004:2.011",
     "sort_mode": "price",
     "mode_fouine": false,
     "joined_at": null,
@@ -345,7 +345,7 @@
     "radius": 20,
     "fuel": "Gazole",
     "sort_by": "price",
-    "last_signature": "price|38340012:1.984|38340013:1.984|38340006:1.989|38170004:2.011|38360006:2.011",
+    "last_signature": "price|38600003:1.980|38340012:1.984|38340013:1.984|38340006:1.989|38170004:2.011",
     "sort_mode": "price",
     "mode_fouine": false
   },
